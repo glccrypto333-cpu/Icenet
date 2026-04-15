@@ -280,27 +280,28 @@ class Bot:
         arrow = "⬆️" if v > 0 else "⬇️"
         return "❗️" + arrow
 
+    def funding_mark(self, funding):
+        if funding is None:
+            return ""
+        af = abs(funding)
+        arrow = "⬆️" if funding > 0 else "⬇️"
+        if af == 0:
+            return ""
+        if af < 0.5:
+            return f"❗️ {arrow}"
+        if af < 1:
+            return f"❗️❗️ {arrow}"
+        return f"❗️❗️❗️ {arrow}"
 
-def funding_mark(self, funding):
-    if funding is None:
-        return ""
-    a = abs(float(funding))
-    arrow = "⬆️" if funding > 0 else "⬇️"
-    if a < 0.5:
-        return f"❗️ {arrow}"
-    if a < 1:
-        return f"❗️❗️ {arrow}"
-    return f"❗️❗️❗️ {arrow}"
-
-def sentiment_accounts(self, long_pct, short_pct):
-    if long_pct is None or short_pct is None:
-        return ("", "")
-    skew = abs(long_pct - short_pct)
-    if skew < 10:
-        return ("", "")
-    long_icon = "⬆️" if long_pct > short_pct else "⬇️"
-    short_icon = "⬆️" if short_pct > long_pct else "⬇️"
-    return (long_icon, short_icon)
+    def sentiment_accounts(self, long_pct, short_pct):
+        if long_pct is None or short_pct is None:
+            return ("", "")
+        skew = abs(long_pct - short_pct)
+        if skew < 10:
+            return ("", "")
+        long_icon = "⬆️" if long_pct > short_pct else "⬇️"
+        short_icon = "⬆️" if short_pct > long_pct else "⬇️"
+        return (long_icon, short_icon)
 
     def mark_usd(self, v, thr):
         prefix = (self.level_marks(3) + " ") if (v is not None and v >= thr) else ""
@@ -419,10 +420,6 @@ def sentiment_accounts(self, long_pct, short_pct):
         st["pending_level"] = 0
         st["pending_since_ts"] = 0.0
         st["pending_snapshot"] = None
-        st["last_sent_signature"] = ""
-        st["last_sent_ts"] = 0.0
-        st["last_sent_signature"] = ""
-        st["last_sent_ts"] = 0.0
 
     def open_range(self, state_key, ex, now):
         st = self.symbol_state[state_key]
@@ -486,33 +483,32 @@ def sentiment_accounts(self, long_pct, short_pct):
         self.cfg.setdefault(section, {})
         self.cfg[section][key] = parsed_value
 
-
-def format_limits(self):
-    s = self.cfg.get("signals", {})
-    f = self.cfg.get("filters", {})
-    ex = ",".join(s.get("allowed_exchanges", ["BINANCE", "BYBIT"]))
-    return (
-        "<b>Текущие лимиты</b>\n\n"
-        f"Ликвидация 1: {int(s.get('liq_level_1_usd', 9000))}\n"
-        f"Уровень 2: {int(s.get('level_2_usd', 15000))}\n"
-        f"Уровень 3: {int(s.get('level_3_usd', 30000))}\n"
-        f"Уровень 4: {int(s.get('level_4_usd', 50000))}\n"
-        f"Уровень 5: {int(s.get('level_5_usd', 70000))}\n"
-        f"Уровень 6: {int(s.get('level_6_usd', 90000))}\n"
-        f"Уровень 7: {int(s.get('level_7_usd', 110000))}\n"
-        f"Hyper: {int(s.get('hyper_usd', 150000))}\n"
-        f"Super Hyper: {int(s.get('super_hyper_usd', 300000))}\n"
-        f"Hyper cooldown: {int(s.get('hyper_cooldown_sec', 600))} сек\n"
-        f"Super Hyper cooldown: {int(s.get('super_hyper_cooldown_sec', 1800))} сек\n"
-        f"Monster 3ч: {int(s.get('monster_3h_usd', 500000))}\n"
-        f"Monster mute: {int(s.get('monster_mute_sec', 18000)) // 3600} ч\n"
-        f"Буфер: {int(s.get('range_delay_sec', 30))} сек\n"
-        f"Reset диапазона: {int(s.get('range_reset_sec', 900)) // 60} мин\n"
-        f"Биржи сигналов: {ex}\n"
-        f"Терминал: {int(f.get('min_terminal_usd', 10000))}\n"
-        f"Мин. событие: {int(f.get('min_event_usd', 9000))}\n"
-        f"Top 10 минимум: {int(f.get('top30_min_usd', 3000))}"
-    )
+    def format_limits(self):
+        s = self.cfg.get("signals", {})
+        f = self.cfg.get("filters", {})
+        ex = ",".join(s.get("allowed_exchanges", ["BINANCE", "BYBIT"]))
+        return (
+            "<b>Текущие лимиты</b>\n\n"
+            f"Ликвидация 1: {int(s.get('liq_level_1_usd', 9000))}\n"
+            f"Уровень 2: {int(s.get('level_2_usd', 15000))}\n"
+            f"Уровень 3: {int(s.get('level_3_usd', 30000))}\n"
+            f"Уровень 4: {int(s.get('level_4_usd', 50000))}\n"
+            f"Уровень 5: {int(s.get('level_5_usd', 70000))}\n"
+            f"Уровень 6: {int(s.get('level_6_usd', 90000))}\n"
+            f"Уровень 7: {int(s.get('level_7_usd', 110000))}\n"
+            f"Hyper: {int(s.get('hyper_usd', 150000))}\n"
+            f"Super Hyper: {int(s.get('super_hyper_usd', 300000))}\n"
+            f"Hyper cooldown: {int(s.get('hyper_cooldown_sec', 600))} сек\n"
+            f"Super Hyper cooldown: {int(s.get('super_hyper_cooldown_sec', 900))} сек\n"
+            f"Monster 3ч: {int(s.get('monster_3h_usd', 500000))}\n"
+            f"Monster mute: {int(s.get('monster_mute_sec', 18000)) // 3600} ч\n"
+            f"Буфер: {int(s.get('range_delay_sec', 30))} сек\n"
+            f"Reset диапазона: {int(s.get('range_reset_sec', 900)) // 60} мин\n"
+            f"Биржи сигналов: {ex}\n"
+            f"Терминал: {int(f.get('min_terminal_usd', 10000))}\n"
+            f"Мин. событие: {int(f.get('min_event_usd', 9000))}\n"
+            f"Top 10 минимум: {int(f.get('top30_min_usd', 3000))}"
+        )
 
     def limit_prompt(self, dotted_key):
         section, key = dotted_key.split(".", 1)
@@ -528,34 +524,30 @@ def format_limits(self):
         while dq and now - dq[0]["ts"] > 1800:
             dq.popleft()
 
+    def format_top30(self, ex):
+        now = time.time()
+        self.prune_market_events(ex, now)
+        min_usd = float(self.cfg.get("filters", {}).get("top30_min_usd", 3000))
 
-def format_top30(self, ex):
-    now = time.time()
-    self.prune_market_events(ex, now)
-    min_usd = float(self.cfg.get("filters", {}).get("top30_min_usd", 3000))
+        agg = {}
+        for row in self.market_events_30m[ex]:
+            sym = row["symbol"]
+            agg[sym] = agg.get(sym, 0.0) + float(row["usd"])
 
-    agg = {}
-    counts = {}
-    for row in self.market_events_30m[ex]:
-        sym = row["symbol"]
-        usd = float(row["usd"])
-        agg[sym] = agg.get(sym, 0.0) + usd
-        counts[sym] = counts.get(sym, 0) + 1
+        rows = [(sym, usd) for sym, usd in agg.items() if usd >= min_usd]
+        rows.sort(key=lambda x: x[1], reverse=True)
+        rows = rows[:10]
 
-    rows = [(sym, usd, counts[sym]) for sym, usd in agg.items() if usd >= min_usd]
-    rows.sort(key=lambda x: x[1], reverse=True)
-    rows = rows[:10]
+        header = f"<b>Топ 10 ликвидаций за 30м — {ex}</b>\n<i>с момента запуска бота</i>"
+        if not rows:
+            return f"{header}\n\nПока пусто от {self.fmt_usd(min_usd)}."
 
-    header = f"<b>Топ 10 ликвидаций за 30м — {ex}</b>\n<i>с момента запуска бота</i>"
-    if not rows:
-        return f"{header}\n\nПока пусто от {self.fmt_usd(min_usd)}."
-
-    out = [header]
-    for i, (sym, usd, cnt) in enumerate(rows, 1):
-        cg = self.coinglass_link(ex, sym)
-        by = self.bybit_link(sym)
-        out.append(f"{i}. {sym} — {self.fmt_usd(usd)} ({cnt}) [<a href=\"{cg}\">CG</a>] [<a href=\"{by}\">BY</a>]")
-    return "\n".join(out)
+        out = [header]
+        for i, (sym, usd) in enumerate(rows, 1):
+            cg = self.coinglass_link(ex, sym)
+            by = self.bybit_link(sym)
+            out.append(f'{i}. {sym} — {self.fmt_usd(usd)} [<a href="{cg}">CG</a>] [<a href="{by}">BY</a>]')
+        return "\n".join(out)
 
     def help_text(self):
         return (
@@ -915,53 +907,52 @@ def format_top30(self, ex):
             parts.append(f"10м Уровень {lvl10}")
         return " / ".join(parts) if parts else "нет"
 
+    def render_blocks(self, stats):
+        rank = stats.get("rank")
+        rank_text = f"#{rank}" if rank else ">250 / н/д"
 
-def render_blocks(self, stats):
-    rank = stats.get("rank")
-    rank_text = f"#{rank}" if rank else ">250 / н/д"
+        tf = stats.get("tf", {})
+        oi = stats.get("oi", {})
+        funding = stats.get("funding")
+        ratio = stats.get("ratio", {})
 
-    tf = stats.get("tf", {})
-    oi = stats.get("oi", {})
-    funding = stats.get("funding")
-    ratio = stats.get("ratio", {})
+        r1 = tf.get("1ч", {})
+        r4 = tf.get("4ч", {})
+        r24 = tf.get("24ч", {})
+        long_pct = ratio.get("long")
+        short_pct = ratio.get("short")
 
-    r1 = tf.get("1ч", {})
-    r4 = tf.get("4ч", {})
-    r24 = tf.get("24ч", {})
-    long_pct = ratio.get("long")
-    short_pct = ratio.get("short")
+        vol1_marks = self.directional_mark(r1.get("vol_pct"), 30, 80)
+        vol4_marks = self.directional_mark(r4.get("vol_pct"), 30, 80)
 
-    vol1_marks = self.directional_mark(r1.get("vol_pct"), 30, 80)
-    vol4_marks = self.directional_mark(r4.get("vol_pct"), 30, 80)
+        px1_marks = self.directional_mark(r1.get("price_pct"), 8, 20)
+        px4_marks = self.directional_mark(r4.get("price_pct"), 10, 25)
+        px24_marks = self.directional_mark(r24.get("price_pct"), 15, 35)
 
-    px1_marks = self.directional_mark(r1.get("price_pct"), 8, 20)
-    px4_marks = self.directional_mark(r4.get("price_pct"), 10, 25)
-    px24_marks = self.directional_mark(r24.get("price_pct"), 15, 35)
+        oi5_marks = self.directional_mark(oi.get("pct_5m"), 3, 8)
+        oi4h_marks = self.directional_mark(oi.get("pct_4h"), 5, 12)
 
-    oi5_marks = self.directional_mark(oi.get("pct_5m"), 3, 8)
-    oi4h_marks = self.directional_mark(oi.get("pct_4h"), 5, 12)
+        acct_long_mark, acct_short_mark = self.sentiment_accounts(long_pct, short_pct)
+        funding_marks = self.funding_mark(funding)
 
-    acct_long_mark, acct_short_mark = self.sentiment_accounts(long_pct, short_pct)
-    funding_marks = self.funding_mark(funding)
-
-    return (
-        f"<b>🏷 Капа-рейтинг:</b> {rank_text}\n\n"
-        f"<b>💵 Объём:</b>\n"
-        f"1ч: {self.fmt_usd(r1.get('vol_usd'))} | {vol1_marks} {self.fmt_pct(r1.get('vol_pct'))}\n"
-        f"4ч: {self.fmt_usd(r4.get('vol_usd'))} | {vol4_marks} {self.fmt_pct(r4.get('vol_pct'))}\n\n"
-        f"<b>📈 Рост цены:</b>\n"
-        f"1ч: {px1_marks} {self.fmt_pct(r1.get('price_pct'))}\n"
-        f"4ч: {px4_marks} {self.fmt_pct(r4.get('price_pct'))}\n"
-        f"24ч: {px24_marks} {self.fmt_pct(r24.get('price_pct'))}\n\n"
-        f"<b>📊 Открытый интерес:</b>\n"
-        f"сейчас: {self.fmt_usd(oi.get('now'))}\n"
-        f"5м: {oi5_marks} {self.fmt_pct(oi.get('pct_5m'))}\n"
-        f"4ч: {oi4h_marks} {self.fmt_pct(oi.get('pct_4h'))}\n\n"
-        f"<b>👥 Аккаунты:</b>\n"
-        f"{acct_long_mark} лонг: {self.fmt_pct(long_pct)} | {acct_short_mark} шорт: {self.fmt_pct(short_pct)}\n\n"
-        f"<b>🩸 Фандинг:</b>\n"
-        f"{funding_marks} {self.fmt_pct(funding)}"
-    )
+        return (
+            f"<b>🏷 Капа-рейтинг:</b> {rank_text}\n\n"
+            f"<b>💵 Объём:</b>\n"
+            f"1ч: {self.fmt_usd(r1.get('vol_usd'))} | {vol1_marks} {self.fmt_pct(r1.get('vol_pct'))}\n"
+            f"4ч: {self.fmt_usd(r4.get('vol_usd'))} | {vol4_marks} {self.fmt_pct(r4.get('vol_pct'))}\n\n"
+            f"<b>📈 Рост цены:</b>\n"
+            f"1ч: {px1_marks} {self.fmt_pct(r1.get('price_pct'))}\n"
+            f"4ч: {px4_marks} {self.fmt_pct(r4.get('price_pct'))}\n"
+            f"24ч: {px24_marks} {self.fmt_pct(r24.get('price_pct'))}\n\n"
+            f"<b>📊 Открытый интерес:</b>\n"
+            f"сейчас: {self.fmt_usd(oi.get('now'))}\n"
+            f"5м: {oi5_marks} {self.fmt_pct(oi.get('pct_5m'))}\n"
+            f"4ч: {oi4h_marks} {self.fmt_pct(oi.get('pct_4h'))}\n\n"
+            f"<b>👥 Аккаунты:</b>\n"
+            f"{acct_long_mark} лонг: {self.fmt_pct(long_pct)} | {acct_short_mark} шорт: {self.fmt_pct(short_pct)}\n\n"
+            f"<b>🩸 Фандинг:</b>\n"
+            f"{funding_marks} {self.fmt_pct(funding)}"
+        )
 
     async def maybe_send_startup_checklist(self):
         if self.startup_telegram_sent:
@@ -1044,82 +1035,69 @@ def render_blocks(self, stats):
             st["pending_snapshot"] = snapshot
             st["last_level_change_ts"] = snapshot["now"]
 
+    async def maybe_send_pending(self, symbol, state_key):
+        st = self.symbol_state[state_key]
+        if st["pending_level"] <= st["last_sent_level"] or not st["pending_snapshot"]:
+            return
 
-async def maybe_send_pending(self, symbol, state_key):
-    st = self.symbol_state[state_key]
-    if st["pending_level"] <= st["last_sent_level"] or not st["pending_snapshot"]:
-        return
+        delay_sec = int(self.cfg["signals"].get("range_delay_sec", 30))
+        now = time.time()
+        if now - st["pending_since_ts"] < delay_sec:
+            return
 
-    delay_sec = int(self.cfg["signals"].get("range_delay_sec", 30))
-    now = time.time()
-    if now - st["pending_since_ts"] < delay_sec:
-        return
+        snap = st["pending_snapshot"]
+        signature = f"{symbol}|{snap['level']}|{int(float(snap.get('sum15', 0)) // 1000)}"
+        if signature == st.get("last_sent_signature") and (now - st.get("last_sent_ts", 0.0)) < 120:
+            st["pending_level"] = 0
+            st["pending_since_ts"] = 0.0
+            st["pending_snapshot"] = None
+            return
 
-    snap = st["pending_snapshot"]
-    signature = f"{symbol}|{snap['level']}|{int(float(snap.get('sum15', 0)) // 1000)}"
-    if signature == st.get("last_sent_signature", "") and (now - st.get("last_sent_ts", 0.0)) < 120:
+        stats = await self.get_symbol_stats(symbol)
+        print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
+        await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
+        st["last_sent_level"] = max(st["last_sent_level"], st["pending_level"])
+        st["last_sent_signature"] = signature
+        st["last_sent_ts"] = now
         st["pending_level"] = 0
         st["pending_since_ts"] = 0.0
         st["pending_snapshot"] = None
-        return
 
-    stats = await self.get_symbol_stats(symbol)
-    print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
-    await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
-    st["last_sent_level"] = max(st["last_sent_level"], st["pending_level"])
-    st["last_sent_signature"] = signature
-    st["last_sent_ts"] = now
-    st["pending_level"] = 0
-    st["pending_since_ts"] = 0.0
-    st["pending_snapshot"] = None
-
-
-async def maybe_send_hyper(self, symbol, state_key, snapshot):
-    st = self.symbol_state[state_key]
-    now = snapshot["now"]
-    hyper_usd = float(self.cfg["signals"].get("hyper_usd", 150000))
-    super_hyper_usd = float(self.cfg["signals"].get("super_hyper_usd", 300000))
-    hyper_cd = int(self.cfg["signals"].get("hyper_cooldown_sec", 600))
-    super_hyper_cd = int(self.cfg["signals"].get("super_hyper_cooldown_sec", 1800))
-
-    is_super = snapshot["sum15"] >= super_hyper_usd
-    if not is_super and snapshot["sum15"] < hyper_usd:
-        return
-
-    if is_super:
-        if now < st.get("super_hyper_cooldown_until", 0.0):
-            return
-    else:
-        if now < st["hyper_cooldown_until"]:
+    async def maybe_send_hyper(self, symbol, state_key, snapshot):
+        st = self.symbol_state[state_key]
+        now = snapshot["now"]
+        hyper_usd = float(self.cfg["signals"].get("hyper_usd", 150000))
+        super_hyper_usd = float(self.cfg["signals"].get("super_hyper_usd", 300000))
+        if snapshot["sum15"] < hyper_usd:
             return
 
-    signature = f"{symbol}|{9 if is_super else 8}|{int(float(snapshot.get('sum15', 0)) // 1000)}"
-    if signature == st.get("last_sent_signature", "") and (now - st.get("last_sent_ts", 0.0)) < 120:
+        is_super = snapshot["sum15"] >= super_hyper_usd
+        cooldown_until = st["super_hyper_cooldown_until"] if is_super else st["hyper_cooldown_until"]
+        if now < cooldown_until:
+            return
+
+        signature = f"{symbol}|{9 if is_super else 8}|{int(float(snapshot.get('sum15', 0)) // 1000)}"
+        if signature == st.get("last_sent_signature") and (now - st.get("last_sent_ts", 0.0)) < 120:
+            return
+
+        stats = await self.get_symbol_stats(symbol)
+        snap = dict(snapshot)
+        snap["super_hyper"] = is_super
+        print(self.trigger_log_line(symbol, snap, hyper=True), flush=True)
+        await self.send(self.msg_signal(symbol, snap, stats, hyper=True))
+
         if is_super:
-            st["super_hyper_cooldown_until"] = now + super_hyper_cd
+            st["super_hyper_cooldown_until"] = now + int(self.cfg["signals"].get("super_hyper_cooldown_sec", 900))
         else:
-            st["hyper_cooldown_until"] = now + hyper_cd
-        return
+            st["hyper_cooldown_until"] = now + int(self.cfg["signals"].get("hyper_cooldown_sec", 600))
 
-    stats = await self.get_symbol_stats(symbol)
-    snap = dict(snapshot)
-    snap["super_hyper"] = is_super
-    print(self.trigger_log_line(symbol, snap, hyper=True), flush=True)
-    await self.send(self.msg_signal(symbol, snap, stats, hyper=True))
-
-    if is_super:
-        st["super_hyper_cooldown_until"] = now + super_hyper_cd
-        st["last_sent_level"] = max(st["last_sent_level"], 9)
-    else:
-        st["hyper_cooldown_until"] = now + hyper_cd
-        st["last_sent_level"] = max(st["last_sent_level"], 8)
-
-    st["last_sent_signature"] = signature
-    st["last_sent_ts"] = now
-    st["pending_level"] = 0
-    st["pending_since_ts"] = 0.0
-    st["pending_snapshot"] = None
-    st["last_level_change_ts"] = now
+        st["last_sent_level"] = max(st["last_sent_level"], 9 if is_super else 8)
+        st["last_sent_signature"] = signature
+        st["last_sent_ts"] = now
+        st["pending_level"] = 0
+        st["pending_since_ts"] = 0.0
+        st["pending_snapshot"] = None
+        st["last_level_change_ts"] = now
 
     def update_monster(self, state_key, now, usd):
         dq = self.events_3h[state_key]
@@ -1134,95 +1112,97 @@ async def maybe_send_hyper(self, symbol, state_key, snapshot):
             return True
         return now < st["monster_mute_until"]
 
-
-async def handle(self, ex, symbol, side, usd):
-    if self.is_blacklisted(symbol):
-        return
-
-    now = time.time()
-    if side == "short":
-        self.market_events_30m[ex].append({"ts": now, "symbol": symbol, "usd": usd})
-        self.prune_market_events(ex, now)
-
-    bybit_symbols = await self.get_all_bybit_symbols()
-    if symbol not in bybit_symbols:
-        return
-
-    allowed_exchanges = set(self.cfg.get("signals", {}).get("allowed_exchanges", ["BINANCE", "BYBIT"]))
-    if ex not in allowed_exchanges:
-        return
-
-    local_key = ("FLOW_LOCAL", ex, symbol, side)
-    agg15_key = ("FLOW_AGG15", symbol, side)
-    state_key = ("STATE", symbol)
-
-    self.events_1m[local_key].append((now, usd))
-    self.events_15m[agg15_key].append((now, usd))
-
-    self.prune(self.events_1m[local_key], 60, now)
-    self.prune(self.events_15m[agg15_key], 900, now)
-
-    local_sum1 = sum(v for _, v in self.events_1m[local_key])
-    agg_sum15 = sum(v for _, v in self.events_15m[agg15_key])
-    agg_cnt = len(self.events_15m[agg15_key])
-
-    if side != "short":
-        return
-
-    if usd >= float(self.cfg["filters"]["min_terminal_usd"]):
-        print(f"{ex:<7} {symbol:<18} SHORT {self.fmt_usd(usd)} | local1м={self.fmt_usd(local_sum1)} agg15м={self.fmt_usd(agg_sum15)}", flush=True)
-
-    if self.update_monster(state_key, now, usd):
-        return
-
-    st = self.symbol_state[state_key]
-
-    if self.should_reset_range(st, now):
-        self.reset_range(state_key)
-
-    entry_threshold = float(self.cfg["signals"].get("liq_level_1_usd", 9000))
-    local_entry_hit = usd >= entry_threshold or local_sum1 >= entry_threshold
-
-    if not st["range_active"]:
-        if not local_entry_hit:
+    async def handle(self, ex, symbol, side, usd):
+        if self.is_blacklisted(symbol):
             return
-        self.open_range(state_key, ex, now)
 
-    # First message should reflect the best current aggregated level, not hardcoded level 1.
-    if st["last_sent_level"] < 1:
-        first_level = max(1, self.compute_level(usd, max(local_sum1, agg_sum15)))
-        first_snapshot = {
+        now = time.time()
+        if side == "short":
+            self.market_events_30m[ex].append({"ts": now, "symbol": symbol, "usd": usd})
+            self.prune_market_events(ex, now)
+
+        bybit_symbols = await self.get_all_bybit_symbols()
+        if symbol not in bybit_symbols:
+            return
+
+        allowed_exchanges = set(self.cfg.get("signals", {}).get("allowed_exchanges", ["BINANCE", "BYBIT"]))
+        if ex not in allowed_exchanges:
+            return
+
+        local_key = ("FLOW_LOCAL", ex, symbol, side)
+        agg15_key = ("FLOW_AGG15", symbol, side)
+        state_key = ("STATE", symbol)
+
+        self.events_1m[local_key].append((now, usd))
+        self.events_15m[agg15_key].append((now, usd))
+
+        self.prune(self.events_1m[local_key], 60, now)
+        self.prune(self.events_15m[agg15_key], 900, now)
+
+        local_sum1 = sum(v for _, v in self.events_1m[local_key])
+        agg_sum15 = sum(v for _, v in self.events_15m[agg15_key])
+        agg_cnt = len(self.events_15m[agg15_key])
+
+        if side != "short":
+            return
+
+        if usd >= float(self.cfg["filters"]["min_terminal_usd"]):
+            print(f"{ex:<7} {symbol:<18} SHORT {self.fmt_usd(usd)} | local1м={self.fmt_usd(local_sum1)} agg15м={self.fmt_usd(agg_sum15)}", flush=True)
+
+        if self.update_monster(state_key, now, usd):
+            return
+
+        st = self.symbol_state[state_key]
+
+        if self.should_reset_range(st, now):
+            self.reset_range(state_key)
+
+        entry_threshold = float(self.cfg["signals"].get("liq_level_1_usd", 9000))
+        min_event_usd = float(self.cfg.get("filters", {}).get("min_event_usd", 9000))
+        local_entry_hit = usd >= entry_threshold or local_sum1 >= entry_threshold
+
+        if not st["range_active"]:
+            if not local_entry_hit:
+                return
+            self.open_range(state_key, ex, now)
+
+        # before first send, send the best currently reached level from the accumulated flow
+        if st["last_sent_level"] < 1:
+            if agg_sum15 < entry_threshold and usd < min_event_usd:
+                return
+            pre_level = max(1, self.compute_level(usd, max(local_sum1, agg_sum15)))
+            first_snapshot = {
+                "now": now,
+                "ex": ex,
+                "trigger_usd": max(usd, min_event_usd if agg_sum15 >= entry_threshold else usd),
+                "sum15": max(local_sum1, agg_sum15),
+                "cnt": agg_cnt,
+                "level": pre_level,
+            }
+            self.maybe_queue_level(state_key, first_snapshot)
+            await self.maybe_send_pending(symbol, state_key)
+            return
+
+        level = self.compute_level(0, agg_sum15)
+        if level < 2:
+            await self.maybe_send_pending(symbol, state_key)
+            return
+
+        snapshot = {
             "now": now,
             "ex": ex,
-            "trigger_usd": max(usd, local_sum1),
-            "sum15": max(local_sum1, agg_sum15),
+            "trigger_usd": max(usd, min_event_usd),
+            "sum15": agg_sum15,
             "cnt": agg_cnt,
-            "level": first_level,
+            "level": level,
         }
-        self.maybe_queue_level(state_key, first_snapshot)
+
+        await self.maybe_send_hyper(symbol, state_key, snapshot)
+
+        if level > st["last_sent_level"]:
+            self.maybe_queue_level(state_key, snapshot)
+
         await self.maybe_send_pending(symbol, state_key)
-        return
-
-    level = self.compute_level(0, agg_sum15)
-    if level < 2:
-        await self.maybe_send_pending(symbol, state_key)
-        return
-
-    snapshot = {
-        "now": now,
-        "ex": ex,
-        "trigger_usd": usd,
-        "sum15": agg_sum15,
-        "cnt": agg_cnt,
-        "level": level,
-    }
-
-    await self.maybe_send_hyper(symbol, state_key, snapshot)
-
-    if level > st["last_sent_level"]:
-        self.maybe_queue_level(state_key, snapshot)
-
-    await self.maybe_send_pending(symbol, state_key)
 
     async def run_binance(self):
         while True:

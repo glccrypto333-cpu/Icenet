@@ -44,7 +44,7 @@ signals:
   level_7_usd: 110000
   hyper_usd: 150000
   super_hyper_usd: 300000
-  super_hyper_cooldown_sec: 1800
+  super_hyper_cooldown_sec: 900
 runtime:
   watchdog_enabled: true
   watchdog_no_data_sec: 180
