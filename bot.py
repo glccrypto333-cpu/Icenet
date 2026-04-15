@@ -928,7 +928,7 @@ class Bot:
             return
 
         checklist = (
-            "<b>🤖 LIQ BOT / V5_topnote</b>\n\n"
+            "<b>🤖 LIQ BOT / V5.4_level_fix</b>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -1220,7 +1220,7 @@ class Bot:
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5_topnote", flush=True)
+        print("✅ BOT STARTED / V5.4_level_fix", flush=True)
         await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
 
 

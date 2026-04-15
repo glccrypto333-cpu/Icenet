@@ -3,11 +3,11 @@ telegram:
   chat_id: ''
 filters:
   min_terminal_usd: 10000
-  min_event_usd: 9000
+  min_event_usd: 10000
   min_flow_1m_usd: 15000
   cooldown_sec: 120
   top15_min_usd: 1000
-  top30_min_usd: 3000
+  top30_min_usd: 1000
 signals:
   single_event_cooldown_sec: 90
   flow_1m_level_1_usd: 20000
