@@ -2,3 +2,5 @@
 *.png
 bot_V5*.py
 config_V5*.yaml
+
+.DS_Store

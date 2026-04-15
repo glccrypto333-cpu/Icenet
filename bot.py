@@ -270,19 +270,7 @@ class Bot:
         arrow = "⬆️" if v > 0 else "⬇️"
         return "❗️" + arrow
 
-    
-    def funding_mark(self, funding):
-        if funding is None:
-            return ""
-        a = abs(funding)
-        arrow = "⬆️" if funding > 0 else "⬇️"
-        if a < 0.5:
-            return f"❗️ {arrow}"
-        elif a < 1:
-            return f"❗️❗️ {arrow}"
-        else:
-            return f"❗️❗️❗️ {arrow}"
-def sentiment_accounts(self, long_pct, short_pct):
+    def sentiment_accounts(self, long_pct, short_pct):
         if long_pct is None or short_pct is None:
             return ""
         skew = abs(long_pct - short_pct)
@@ -320,7 +308,7 @@ def sentiment_accounts(self, long_pct, short_pct):
 
     def is_blacklisted(self, symbol):
         bl = set(self.cfg.get("symbols", {}).get("blacklist", []))
-        return symbol in bl or symbol.endswith("USDC") or ("-" in symbol)
+        return symbol in bl or symbol.endswith("USDC")
 
     def allow_symbol_global(self, symbol):
         cooldown_sec = int(self.cfg["signals"].get("cross_exchange_cooldown_sec", 90))
@@ -516,31 +504,12 @@ def sentiment_accounts(self, long_pct, short_pct):
     def format_top30(self, ex):
         now = time.time()
         self.prune_market_events(ex, now)
-        min_usd = 3000
-
-        agg = {}
-        for row in self.market_events_30m[ex]:
-            sym = row["symbol"]
-            agg[sym] = agg.get(sym, 0) + float(row["usd"])
-
-        rows = [(s, u) for s, u in agg.items() if u >= min_usd]
-        rows.sort(key=lambda x: x[1], reverse=True)
-        rows = rows[:10]
-
-        header = f"<b>Топ 10 ликвидаций за 30м — {ex}</b>
-<i>с момента запуска бота</i>"
-
+        min_usd = float(self.cfg.get("filters", {}).get("top30_min_usd", 1000))
+        rows = [r for r in self.market_events_30m[ex] if r["usd"] >= min_usd]
+        rows = sorted(rows, key=lambda x: x["usd"], reverse=True)[:10]
+        header = f"<b>Топ 10 ликвидаций за 30м — {ex}</b>\n<i>с момента запуска бота</i>"
         if not rows:
-            return f"{header}
-
-Пусто"
-
-        out = [header]
-        for i, (sym, usd) in enumerate(rows, 1):
-            out.append(f"{i}. {sym} — {self.fmt_usd(usd)}")
-        return "
-".join(out)
-}."
+            return f"{header}\n\nПока пусто от {self.fmt_usd(min_usd)}."
         out = [header]
         for i, row in enumerate(rows, 1):
             sym = row['symbol']
@@ -959,7 +928,7 @@ def sentiment_accounts(self, long_pct, short_pct):
             return
 
         checklist = (
-            "<b>🤖 LIQ BOT / V5_topnote</b>\n\n"
+            "<b>🤖 LIQ BOT / V5.4_level_fix</b>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -1251,7 +1220,7 @@ def sentiment_accounts(self, long_pct, short_pct):
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5_topnote", flush=True)
+        print("✅ BOT STARTED / V5.4_level_fix", flush=True)
         await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
 
 
