@@ -112,10 +112,7 @@ class Bot:
             "pending_since_ts": 0.0,
             "pending_snapshot": None,
             "hyper_cooldown_until": 0.0,
-            "super_hyper_cooldown_until": 0.0,
             "monster_mute_until": 0.0,
-            "last_sent_signature": "",
-            "last_sent_ts": 0.0,
         })
 
         self.binance_cache = {}
@@ -145,6 +142,7 @@ class Bot:
         self.allowed_override_keys = {
             "filters.min_terminal_usd": int,
             "filters.min_event_usd": int,
+            "filters.top30_min_usd": int,
             "signals.liq_level_1_usd": int,
             "signals.level_2_usd": int,
             "signals.level_3_usd": int,
@@ -280,28 +278,17 @@ class Bot:
         arrow = "⬆️" if v > 0 else "⬇️"
         return "❗️" + arrow
 
-    def funding_mark(self, funding):
-        if funding is None:
-            return ""
-        af = abs(funding)
-        arrow = "⬆️" if funding > 0 else "⬇️"
-        if af == 0:
-            return ""
-        if af < 0.5:
-            return f"❗️ {arrow}"
-        if af < 1:
-            return f"❗️❗️ {arrow}"
-        return f"❗️❗️❗️ {arrow}"
-
     def sentiment_accounts(self, long_pct, short_pct):
         if long_pct is None or short_pct is None:
-            return ("", "")
+            return ""
         skew = abs(long_pct - short_pct)
-        if skew < 10:
-            return ("", "")
-        long_icon = "⬆️" if long_pct > short_pct else "⬇️"
-        short_icon = "⬆️" if short_pct > long_pct else "⬇️"
-        return (long_icon, short_icon)
+        if skew >= 30:
+            return self.level_marks(3)
+        if skew >= 20:
+            return self.level_marks(2)
+        if skew >= 10:
+            return self.level_marks(1)
+        return ""
 
     def mark_usd(self, v, thr):
         prefix = (self.level_marks(3) + " ") if (v is not None and v >= thr) else ""
@@ -317,10 +304,34 @@ class Bot:
     def bybit_link(self, symbol):
         return f"https://www.bybit.com/trade/usdt/{symbol}"
 
-    def compact_links(self, exchange, symbol):
+    def resolve_bybit_symbol(self, symbol, bybit_symbols=None):
+        if bybit_symbols is None:
+            bybit_symbols = self.bybit_symbols_cache or []
+        if symbol in bybit_symbols:
+            return symbol
+
+        base = symbol[:-4] if symbol.endswith("USDT") else symbol
+        candidates = []
+        for s in bybit_symbols:
+            if not s.endswith("USDT"):
+                continue
+            if s.startswith(base):
+                candidates.append((0, len(s), s))
+            elif base in s:
+                candidates.append((1, len(s), s))
+            elif s[:-4].startswith(base[:max(3, min(5, len(base)))]):
+                candidates.append((2, len(s), s))
+        if not candidates:
+            return None
+        candidates.sort()
+        return candidates[0][2]
+
+    def compact_links(self, exchange, symbol, mapped_symbol=None):
         cg = self.coinglass_link(exchange, symbol)
-        by = self.bybit_link(symbol)
-        return f'🔗 <a href="{cg}">CG</a> | <a href="{by}">BY</a>'
+        if mapped_symbol:
+            by = self.bybit_link(mapped_symbol)
+            return f'🔗 <a href="{cg}">CG</a> | <a href="{by}">BY</a>'
+        return f'🔗 <a href="{cg}">CG</a> | BY n/a'
 
     # ========= helpers =========
     def prune(self, dq, sec, now):
@@ -506,7 +517,7 @@ class Bot:
             f"Reset диапазона: {int(s.get('range_reset_sec', 900)) // 60} мин\n"
             f"Биржи сигналов: {ex}\n"
             f"Терминал: {int(f.get('min_terminal_usd', 10000))}\n"
-            f"Мин. событие: {int(f.get('min_event_usd', 9000))}\n"
+            f"Мин. событие: {int(s.get('liq_level_1_usd', 9000))}\n"
             f"Top 10 минимум: {int(f.get('top30_min_usd', 3000))}"
         )
 
@@ -541,12 +552,16 @@ class Bot:
         header = f"<b>Топ 10 ликвидаций за 30м — {ex}</b>\n<i>с момента запуска бота</i>"
         if not rows:
             return f"{header}\n\nПока пусто от {self.fmt_usd(min_usd)}."
-
         out = [header]
+        bybit_symbols = self.bybit_symbols_cache or []
         for i, (sym, usd) in enumerate(rows, 1):
             cg = self.coinglass_link(ex, sym)
-            by = self.bybit_link(sym)
-            out.append(f'{i}. {sym} — {self.fmt_usd(usd)} [<a href="{cg}">CG</a>] [<a href="{by}">BY</a>]')
+            mapped = self.resolve_bybit_symbol(sym, bybit_symbols)
+            if mapped:
+                by = self.bybit_link(mapped)
+                out.append(f"{i}. {sym} — {self.fmt_usd(usd)} [<a href=\"{cg}\">CG</a>] [<a href=\"{by}\">BY</a>]")
+            else:
+                out.append(f"{i}. {sym} — {self.fmt_usd(usd)} [<a href=\"{cg}\">CG</a>] [BY n/a]")
         return "\n".join(out)
 
     def help_text(self):
@@ -930,10 +945,9 @@ class Bot:
         px24_marks = self.directional_mark(r24.get("price_pct"), 15, 35)
 
         oi5_marks = self.directional_mark(oi.get("pct_5m"), 3, 8)
-        oi4h_marks = self.directional_mark(oi.get("pct_4h"), 5, 12)
 
-        acct_long_mark, acct_short_mark = self.sentiment_accounts(long_pct, short_pct)
-        funding_marks = self.funding_mark(funding)
+        acct_marks = self.sentiment_accounts(long_pct, short_pct)
+        funding_marks = self.sentiment_pct(funding, 0.03, 0.08, 0.15)
 
         return (
             f"<b>🏷 Капа-рейтинг:</b> {rank_text}\n\n"
@@ -946,10 +960,9 @@ class Bot:
             f"24ч: {px24_marks} {self.fmt_pct(r24.get('price_pct'))}\n\n"
             f"<b>📊 Открытый интерес:</b>\n"
             f"сейчас: {self.fmt_usd(oi.get('now'))}\n"
-            f"5м: {oi5_marks} {self.fmt_pct(oi.get('pct_5m'))}\n"
-            f"4ч: {oi4h_marks} {self.fmt_pct(oi.get('pct_4h'))}\n\n"
+            f"5м: {oi5_marks} {self.fmt_pct(oi.get('pct_5m'))}\n\n"
             f"<b>👥 Аккаунты:</b>\n"
-            f"{acct_long_mark} лонг: {self.fmt_pct(long_pct)} | {acct_short_mark} шорт: {self.fmt_pct(short_pct)}\n\n"
+            f"{acct_marks} лонг: {self.fmt_pct(long_pct)} | шорт: {self.fmt_pct(short_pct)}\n\n"
             f"<b>🩸 Фандинг:</b>\n"
             f"{funding_marks} {self.fmt_pct(funding)}"
         )
@@ -961,7 +974,7 @@ class Bot:
             return
 
         checklist = (
-            "<b>🤖 LIQ BOT / V5.5_data_ui_fix</b>\n\n"
+            "<b>🤖 LIQ BOT / V5.5.2_mapping_fallback</b>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -997,6 +1010,7 @@ class Bot:
         cnt = snapshot["cnt"]
         level = snapshot["level"]
         super_hyper = snapshot.get("super_hyper", False)
+        mapped_symbol = snapshot.get("mapped_symbol")
 
         if super_hyper:
             top_line = f"🚨 9️⃣ {symbol_safe} AGG"
@@ -1014,13 +1028,19 @@ class Bot:
 
         trigger_flow = f"💥 <b>{self.fmt_usd(sum15)} | {cnt} {self.events_word(cnt)}</b> 💥"
 
+        bybit_note = ""
+        if mapped_symbol and mapped_symbol != symbol:
+            bybit_note = f"\n⚠️ Bybit аналог: <b>{self.esc(mapped_symbol)}</b>"
+        elif not mapped_symbol:
+            bybit_note = "\n⚠️ Нет точного тикера на Bybit"
+
         return (
             f"<b>{top_line}</b>\n"
             f"<b>{header}</b>\n\n"
             f"Событие: {self.fmt_usd(trigger_usd)}\n"
-            f"Поток 15м: {trigger_flow}\n\n"
+            f"Поток 15м: {trigger_flow}{bybit_note}\n\n"
             f"{self.render_blocks(stats)}\n\n"
-            f"{self.compact_links(ex if level == 1 else 'BYBIT', symbol)}"
+            f"{self.compact_links(ex if level == 1 else 'BYBIT', symbol, mapped_symbol)}"
         )
 
     def maybe_queue_level(self, state_key, snapshot):
@@ -1046,19 +1066,10 @@ class Bot:
             return
 
         snap = st["pending_snapshot"]
-        signature = f"{symbol}|{snap['level']}|{int(float(snap.get('sum15', 0)) // 1000)}"
-        if signature == st.get("last_sent_signature") and (now - st.get("last_sent_ts", 0.0)) < 120:
-            st["pending_level"] = 0
-            st["pending_since_ts"] = 0.0
-            st["pending_snapshot"] = None
-            return
-
         stats = await self.get_symbol_stats(symbol)
         print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
         await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
-        st["last_sent_level"] = max(st["last_sent_level"], st["pending_level"])
-        st["last_sent_signature"] = signature
-        st["last_sent_ts"] = now
+        st["last_sent_level"] = st["pending_level"]
         st["pending_level"] = 0
         st["pending_since_ts"] = 0.0
         st["pending_snapshot"] = None
@@ -1070,30 +1081,17 @@ class Bot:
         super_hyper_usd = float(self.cfg["signals"].get("super_hyper_usd", 300000))
         if snapshot["sum15"] < hyper_usd:
             return
-
-        is_super = snapshot["sum15"] >= super_hyper_usd
-        cooldown_until = st["super_hyper_cooldown_until"] if is_super else st["hyper_cooldown_until"]
-        if now < cooldown_until:
-            return
-
-        signature = f"{symbol}|{9 if is_super else 8}|{int(float(snapshot.get('sum15', 0)) // 1000)}"
-        if signature == st.get("last_sent_signature") and (now - st.get("last_sent_ts", 0.0)) < 120:
+        if now < st["hyper_cooldown_until"]:
             return
 
         stats = await self.get_symbol_stats(symbol)
+        is_super = snapshot["sum15"] >= super_hyper_usd
         snap = dict(snapshot)
         snap["super_hyper"] = is_super
         print(self.trigger_log_line(symbol, snap, hyper=True), flush=True)
         await self.send(self.msg_signal(symbol, snap, stats, hyper=True))
-
-        if is_super:
-            st["super_hyper_cooldown_until"] = now + int(self.cfg["signals"].get("super_hyper_cooldown_sec", 900))
-        else:
-            st["hyper_cooldown_until"] = now + int(self.cfg["signals"].get("hyper_cooldown_sec", 600))
-
+        st["hyper_cooldown_until"] = now + int(self.cfg["signals"].get("hyper_cooldown_sec", 600))
         st["last_sent_level"] = max(st["last_sent_level"], 9 if is_super else 8)
-        st["last_sent_signature"] = signature
-        st["last_sent_ts"] = now
         st["pending_level"] = 0
         st["pending_since_ts"] = 0.0
         st["pending_snapshot"] = None
@@ -1122,8 +1120,7 @@ class Bot:
             self.prune_market_events(ex, now)
 
         bybit_symbols = await self.get_all_bybit_symbols()
-        if symbol not in bybit_symbols:
-            return
+        mapped_symbol = self.resolve_bybit_symbol(symbol, bybit_symbols)
 
         allowed_exchanges = set(self.cfg.get("signals", {}).get("allowed_exchanges", ["BINANCE", "BYBIT"]))
         if ex not in allowed_exchanges:
@@ -1158,28 +1155,30 @@ class Bot:
             self.reset_range(state_key)
 
         entry_threshold = float(self.cfg["signals"].get("liq_level_1_usd", 9000))
-        min_event_usd = float(self.cfg.get("filters", {}).get("min_event_usd", 9000))
+        min_event_usd = entry_threshold
         local_entry_hit = usd >= entry_threshold or local_sum1 >= entry_threshold
 
         if not st["range_active"]:
+            if usd < min_event_usd and not local_entry_hit:
+                return
             if not local_entry_hit:
                 return
             self.open_range(state_key, ex, now)
-
-        # before first send, send the best currently reached level from the accumulated flow
-        if st["last_sent_level"] < 1:
-            if agg_sum15 < entry_threshold and usd < min_event_usd:
-                return
-            pre_level = max(1, self.compute_level(usd, max(local_sum1, agg_sum15)))
-            first_snapshot = {
+            pre_level = self.compute_level(usd, max(local_sum1, agg_sum15))
+            entry_snapshot = {
                 "now": now,
                 "ex": ex,
-                "trigger_usd": max(usd, min_event_usd if agg_sum15 >= entry_threshold else usd),
+                "trigger_usd": max(usd, entry_threshold if agg_sum15 >= entry_threshold else usd),
                 "sum15": max(local_sum1, agg_sum15),
                 "cnt": agg_cnt,
-                "level": pre_level,
+                "level": max(1, pre_level),
+                "mapped_symbol": mapped_symbol,
             }
-            self.maybe_queue_level(state_key, first_snapshot)
+            self.maybe_queue_level(state_key, entry_snapshot)
+            await self.maybe_send_pending(symbol, state_key)
+            return
+
+        if st["last_sent_level"] < 1:
             await self.maybe_send_pending(symbol, state_key)
             return
 
@@ -1191,10 +1190,11 @@ class Bot:
         snapshot = {
             "now": now,
             "ex": ex,
-            "trigger_usd": max(usd, min_event_usd),
+            "trigger_usd": max(usd, entry_threshold if agg_sum15 >= entry_threshold else usd),
             "sum15": agg_sum15,
             "cnt": agg_cnt,
             "level": level,
+            "mapped_symbol": mapped_symbol,
         }
 
         await self.maybe_send_hyper(symbol, state_key, snapshot)
@@ -1278,7 +1278,7 @@ class Bot:
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5.5_data_ui_fix", flush=True)
+        print("✅ BOT STARTED / V5.5.2_mapping_fallback", flush=True)
         await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
 
 
