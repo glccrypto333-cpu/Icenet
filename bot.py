@@ -177,6 +177,7 @@ class Bot:
         self.mode_menu = {
             "keyboard": [
                 [{"text": "🟢 Боевой"}, {"text": "🟡 Fast test"}],
+                [{"text": "🟠 Power day"}],
                 [{"text": "↩️ Назад"}],
             ],
             "resize_keyboard": True,
@@ -548,8 +549,8 @@ class Bot:
         f = self.cfg.get("filters", {})
         ex = ",".join(s.get("allowed_exchanges", ["BINANCE", "BYBIT"]))
         mode = str(self.cfg.get("runtime", {}).get("signal_mode", "combat"))
-        mode_text = "Fast test" if mode == "fast_test" else "Боевой"
-        min_event_effective = 500 if mode == "fast_test" else 9000
+        mode_text = "Fast test" if mode == "fast_test" else ("Power day" if mode == "power_day" else "Боевой")
+        min_event_effective = 500 if mode == "fast_test" else (25000 if mode == "power_day" else 9000)
         return (
             "<b>Текущие лимиты</b>\n\n"
             f"Режим: {mode_text}\n"
@@ -672,10 +673,54 @@ class Bot:
         return sio.getvalue()
 
     def apply_signal_mode(self, mode_name):
-        self.cfg.setdefault('runtime', {})
-        self.cfg.setdefault('filters', {})
-        self.cfg['runtime']['signal_mode'] = mode_name
-        self.cfg['filters']['min_event_usd'] = 500 if mode_name == 'fast_test' else 9000
+        self.cfg.setdefault("runtime", {})
+        self.cfg.setdefault("filters", {})
+        self.cfg.setdefault("signals", {})
+        self.cfg["runtime"]["signal_mode"] = mode_name
+
+        if mode_name == "fast_test":
+            self.cfg["signals"]["liq_level_1_usd"] = 9000
+            self.cfg["signals"]["level_2_usd"] = 15000
+            self.cfg["signals"]["level_3_usd"] = 30000
+            self.cfg["signals"]["level_4_usd"] = 50000
+            self.cfg["signals"]["level_5_usd"] = 90000
+            self.cfg["signals"]["level_6_usd"] = 120000
+            self.cfg["signals"]["level_7_usd"] = 150000
+            self.cfg["signals"]["hyper_usd"] = 200000
+            self.cfg["signals"]["super_hyper_usd"] = 300000
+            self.cfg["signals"]["super_hyper_cooldown_sec"] = 3600
+            self.cfg["signals"]["monster_3h_usd"] = 500000
+            self.cfg["signals"]["monster_mute_sec"] = 10800
+            self.cfg["filters"]["min_event_usd"] = 500
+        elif mode_name == "power_day":
+            self.cfg["signals"]["liq_level_1_usd"] = 25000
+            self.cfg["signals"]["level_2_usd"] = 35000
+            self.cfg["signals"]["level_3_usd"] = 50000
+            self.cfg["signals"]["level_4_usd"] = 90000
+            self.cfg["signals"]["level_5_usd"] = 120000
+            self.cfg["signals"]["level_6_usd"] = 150000
+            self.cfg["signals"]["level_7_usd"] = 180000
+            self.cfg["signals"]["hyper_usd"] = 200000
+            self.cfg["signals"]["super_hyper_usd"] = 300000
+            self.cfg["signals"]["super_hyper_cooldown_sec"] = 3600
+            self.cfg["signals"]["monster_3h_usd"] = 500000
+            self.cfg["signals"]["monster_mute_sec"] = 10800
+            self.cfg["filters"]["min_event_usd"] = 25000
+        else:
+            self.cfg["signals"]["liq_level_1_usd"] = 9000
+            self.cfg["signals"]["level_2_usd"] = 15000
+            self.cfg["signals"]["level_3_usd"] = 30000
+            self.cfg["signals"]["level_4_usd"] = 50000
+            self.cfg["signals"]["level_5_usd"] = 90000
+            self.cfg["signals"]["level_6_usd"] = 120000
+            self.cfg["signals"]["level_7_usd"] = 150000
+            self.cfg["signals"]["hyper_usd"] = 200000
+            self.cfg["signals"]["super_hyper_usd"] = 300000
+            self.cfg["signals"]["super_hyper_cooldown_sec"] = 3600
+            self.cfg["signals"]["monster_3h_usd"] = 500000
+            self.cfg["signals"]["monster_mute_sec"] = 10800
+            self.cfg["filters"]["min_event_usd"] = 9000
+        self.cfg["filters"]["top30_min_usd"] = 3000
         return self.format_limits()
 
     async def handle_control_command(self, text):
@@ -702,11 +747,13 @@ class Bot:
         if text in ("/export_24h", "📤 Сигналы 24ч"):
             return self.export_signals_text() + "\n\n<b>CSV 24ч</b>\n<code>" + html.escape(self.export_signals_csv_text()[:3000]) + "</code>", self.keyboard
         if text in ("⚙️ Режим", "/mode"):
-            return "<b>Выбор режима</b>\n\n🟢 Боевой — мин. событие = 9000\n🟡 Fast test — мин. событие = 500", self.mode_menu
+            return "<b>Выбор режима</b>\n\n🟢 Боевой — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000", self.mode_menu
         if text == "🟢 Боевой":
             return "✅ Режим переключен: <b>Боевой</b>\n\n" + self.apply_signal_mode("combat"), self.keyboard
         if text == "🟡 Fast test":
             return "✅ Режим переключен: <b>Fast test</b>\n\n" + self.apply_signal_mode("fast_test"), self.keyboard
+        if text == "🟠 Power day":
+            return "✅ Режим переключен: <b>Power day</b>\n\n" + self.apply_signal_mode("power_day"), self.keyboard
 
         if text in ("/limits", "📊 Лимиты"):
             return self.format_limits(), self.limit_menu
@@ -1076,7 +1123,7 @@ class Bot:
             return
 
         checklist = (
-            "<b>🤖 LIQ BOT / V5.6.3_tiger_startup</b>\n\n"
+            "<b>🤖 Mighty Tiger / V5.6.4_power_day</b>\n<i>Ggrrr... Liquidity jungle hunter</i>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -1483,7 +1530,7 @@ class Bot:
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5.6.3_tiger_startup", flush=True)
+        print("✅ BOT STARTED / V5.6.4_power_day", flush=True)
         await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
 
 
