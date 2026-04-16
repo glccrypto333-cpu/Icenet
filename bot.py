@@ -107,12 +107,16 @@ class Bot:
             "range_start_ts": 0.0,
             "range_exchange": "",
             "last_sent_level": 0,
+            "max_level_sent": 0,
             "last_level_change_ts": 0.0,
             "pending_level": 0,
             "pending_since_ts": 0.0,
             "pending_snapshot": None,
             "hyper_cooldown_until": 0.0,
+            "super_hyper_cooldown_until": 0.0,
             "monster_mute_until": 0.0,
+            "last_sent_signature": "",
+            "last_sent_ts": 0.0,
         })
 
         self.binance_cache = {}
@@ -132,17 +136,15 @@ class Bot:
             "5️⃣ Уровень 5": "signals.level_5_usd",
             "6️⃣ Уровень 6": "signals.level_6_usd",
             "7️⃣ Уровень 7": "signals.level_7_usd",
-            "💥 Hyper": "signals.hyper_usd",
-            "🚨 Super Hyper": "signals.super_hyper_usd",
+            "🚨 Super Hyper": "signals.hyper_usd",
             "⏱ Hyper cooldown": "signals.hyper_cooldown_sec",
             "⏱ Super Hyper cooldown": "signals.super_hyper_cooldown_sec",
-            "🐋 Monster": "signals.monster_3h_usd",
+            "🐋 Monster": "signals.super_hyper_usd",
             "⏱ Monster mute": "signals.monster_mute_sec",
         }
         self.allowed_override_keys = {
             "filters.min_terminal_usd": int,
             "filters.min_event_usd": int,
-            "filters.top30_min_usd": int,
             "signals.liq_level_1_usd": int,
             "signals.level_2_usd": int,
             "signals.level_3_usd": int,
@@ -151,9 +153,9 @@ class Bot:
             "signals.level_6_usd": int,
             "signals.level_7_usd": int,
             "signals.hyper_usd": int,
-            "signals.super_hyper_usd": int,
             "signals.hyper_cooldown_sec": int,
             "signals.super_hyper_cooldown_sec": int,
+            "signals.super_hyper_usd": int,
             "signals.monster_3h_usd": int,
             "signals.monster_mute_sec": int,
             "signals.range_delay_sec": int,
@@ -174,10 +176,9 @@ class Bot:
                 [{"text": "1️⃣ Уровень 1"}, {"text": "2️⃣ Уровень 2"}],
                 [{"text": "3️⃣ Уровень 3"}, {"text": "4️⃣ Уровень 4"}],
                 [{"text": "5️⃣ Уровень 5"}, {"text": "6️⃣ Уровень 6"}],
-                [{"text": "7️⃣ Уровень 7"}, {"text": "💥 Hyper"}],
-                [{"text": "🚨 Super Hyper"}, {"text": "⏱ Hyper cooldown"}],
-                [{"text": "⏱ Super Hyper cooldown"}, {"text": "🐋 Monster"}],
-                [{"text": "⏱ Monster mute"}],
+                [{"text": "7️⃣ Уровень 7"}, {"text": "🚨 Super Hyper"}],
+                [{"text": "⏱ Hyper cooldown"}, {"text": "⏱ Super Hyper cooldown"}],
+                [{"text": "🐋 Monster"}, {"text": "⏱ Monster mute"}],
                 [{"text": "↩️ Назад"}],
             ],
             "resize_keyboard": True,
@@ -278,17 +279,41 @@ class Bot:
         arrow = "⬆️" if v > 0 else "⬇️"
         return "❗️" + arrow
 
+    def price_mark(self, v, mild=8.0):
+        if v is None:
+            return ""
+        if abs(v) < mild:
+            return ""
+        return "❗️⬆️" if v > 0 else "❗️⬇️"
+
+    def oi_mark(self, v, mild=1.0):
+        if v is None:
+            return ""
+        if abs(v) < mild:
+            return ""
+        return "❗️⬆️" if v > 0 else "❗️⬇️"
+
     def sentiment_accounts(self, long_pct, short_pct):
         if long_pct is None or short_pct is None:
+            return ("", "")
+        if long_pct > short_pct:
+            return ("⬆️", "⬇️")
+        if short_pct > long_pct:
+            return ("⬇️", "⬆️")
+        return ("", "")
+
+    def funding_mark(self, funding):
+        if funding is None:
             return ""
-        skew = abs(long_pct - short_pct)
-        if skew >= 30:
-            return self.level_marks(3)
-        if skew >= 20:
-            return self.level_marks(2)
-        if skew >= 10:
-            return self.level_marks(1)
-        return ""
+        af = abs(funding)
+        arrow = "⬆️" if funding > 0 else "⬇️"
+        if af == 0:
+            return ""
+        if af < 0.5:
+            return f"❗️ {arrow}"
+        if af < 1:
+            return f"❗️❗️ {arrow}"
+        return f"❗️❗️❗️ {arrow}"
 
     def mark_usd(self, v, thr):
         prefix = (self.level_marks(3) + " ") if (v is not None and v >= thr) else ""
@@ -304,32 +329,25 @@ class Bot:
     def bybit_link(self, symbol):
         return f"https://www.bybit.com/trade/usdt/{symbol}"
 
-    def resolve_bybit_symbol(self, symbol, bybit_symbols=None):
-        if bybit_symbols is None:
-            bybit_symbols = self.bybit_symbols_cache or []
-        if symbol in bybit_symbols:
-            return symbol
-
+    def resolve_bybit_symbol(self, symbol):
+        try:
+            syms = self.bybit_symbols_cache or []
+        except Exception:
+            syms = []
+        if symbol in syms:
+            return symbol, "exact"
         base = symbol[:-4] if symbol.endswith("USDT") else symbol
-        candidates = []
-        for s in bybit_symbols:
-            if not s.endswith("USDT"):
-                continue
-            if s.startswith(base):
-                candidates.append((0, len(s), s))
-            elif base in s:
-                candidates.append((1, len(s), s))
-            elif s[:-4].startswith(base[:max(3, min(5, len(base)))]):
-                candidates.append((2, len(s), s))
-        if not candidates:
-            return None
-        candidates.sort()
-        return candidates[0][2]
+        candidates = [s for s in syms if s.startswith(base)]
+        if candidates:
+            candidates.sort(key=len)
+            return candidates[0], "mapped"
+        return None, "na"
 
-    def compact_links(self, exchange, symbol, mapped_symbol=None):
+    def compact_links(self, exchange, symbol):
         cg = self.coinglass_link(exchange, symbol)
-        if mapped_symbol:
-            by = self.bybit_link(mapped_symbol)
+        by_sym, mode = self.resolve_bybit_symbol(symbol)
+        if by_sym:
+            by = self.bybit_link(by_sym)
             return f'🔗 <a href="{cg}">CG</a> | <a href="{by}">BY</a>'
         return f'🔗 <a href="{cg}">CG</a> | BY n/a'
 
@@ -341,6 +359,15 @@ class Bot:
     def is_blacklisted(self, symbol):
         bl = set(self.cfg.get("symbols", {}).get("blacklist", []))
         return symbol in bl or symbol.endswith("USDC") or ("-" in symbol)
+
+    # ========= helpers =========
+    def prune(self, dq, sec, now):
+        while dq and now - dq[0][0] > sec:
+            dq.popleft()
+
+    def is_blacklisted(self, symbol):
+        bl = set(self.cfg.get("symbols", {}).get("blacklist", []))
+        return symbol in bl or symbol.endswith("USDC")
 
     def allow_symbol_global(self, symbol):
         cooldown_sec = int(self.cfg["signals"].get("cross_exchange_cooldown_sec", 90))
@@ -385,11 +412,11 @@ class Bot:
         return badges.get(level, str(level))
 
     def compute_level(self, trigger_usd, sum15, _unused1=0, _unused2=0):
-        if sum15 >= float(self.cfg["signals"].get("level_7_usd", 110000)):
+        if sum15 >= float(self.cfg["signals"].get("level_7_usd", 150000)):
             return 7
-        if sum15 >= float(self.cfg["signals"].get("level_6_usd", 90000)):
+        if sum15 >= float(self.cfg["signals"].get("level_6_usd", 120000)):
             return 6
-        if sum15 >= float(self.cfg["signals"].get("level_5_usd", 70000)):
+        if sum15 >= float(self.cfg["signals"].get("level_5_usd", 90000)):
             return 5
         if sum15 >= float(self.cfg["signals"].get("level_4_usd", 50000)):
             return 4
@@ -410,8 +437,9 @@ class Bot:
             5: "УРОВЕНЬ 5",
             6: "УРОВЕНЬ 6",
             7: "УРОВЕНЬ 7",
-            8: "ГИПЕР ЛИКВИДАЦИЯ",
-            9: "Монстр",
+            8: "УРОВЕНЬ 8",
+            9: "УРОВЕНЬ 9",
+            10: "MONSTER",
         }
         return labels.get(level, "нет")
 
@@ -427,10 +455,13 @@ class Bot:
         st["range_start_ts"] = 0.0
         st["range_exchange"] = ""
         st["last_sent_level"] = 0
+        st["max_level_sent"] = 0
         st["last_level_change_ts"] = 0.0
         st["pending_level"] = 0
         st["pending_since_ts"] = 0.0
         st["pending_snapshot"] = None
+        st["last_sent_signature"] = ""
+        st["last_sent_ts"] = 0.0
 
     def open_range(self, state_key, ex, now):
         st = self.symbol_state[state_key]
@@ -438,10 +469,13 @@ class Bot:
         st["range_start_ts"] = now
         st["range_exchange"] = ex
         st["last_sent_level"] = 0
+        st["max_level_sent"] = 0
         st["last_level_change_ts"] = now
         st["pending_level"] = 0
         st["pending_since_ts"] = 0.0
         st["pending_snapshot"] = None
+        st["last_sent_signature"] = ""
+        st["last_sent_ts"] = 0.0
 
     def events_word(self, n):
         n = int(n)
@@ -504,15 +538,15 @@ class Bot:
             f"Уровень 2: {int(s.get('level_2_usd', 15000))}\n"
             f"Уровень 3: {int(s.get('level_3_usd', 30000))}\n"
             f"Уровень 4: {int(s.get('level_4_usd', 50000))}\n"
-            f"Уровень 5: {int(s.get('level_5_usd', 70000))}\n"
-            f"Уровень 6: {int(s.get('level_6_usd', 90000))}\n"
-            f"Уровень 7: {int(s.get('level_7_usd', 110000))}\n"
-            f"Hyper: {int(s.get('hyper_usd', 150000))}\n"
-            f"Super Hyper: {int(s.get('super_hyper_usd', 300000))}\n"
-            f"Hyper cooldown: {int(s.get('hyper_cooldown_sec', 600))} сек\n"
-            f"Super Hyper cooldown: {int(s.get('super_hyper_cooldown_sec', 900))} сек\n"
-            f"Monster 3ч: {int(s.get('monster_3h_usd', 500000))}\n"
-            f"Monster mute: {int(s.get('monster_mute_sec', 18000)) // 3600} ч\n"
+            f"Уровень 5: {int(s.get('level_5_usd', 90000))}\n"
+            f"Уровень 6: {int(s.get('level_6_usd', 120000))}\n"
+            f"Уровень 7: {int(s.get('level_7_usd', 150000))}\n"
+            f"Уровень 8 (5м): {int(s.get('hyper_usd', 200000))}\n"
+            f"Уровень 9 (3ч): {int(s.get('super_hyper_usd', 300000))}\n"
+            f"Уровень 8 cooldown: {int(s.get('hyper_cooldown_sec', 0))} сек\n"
+            f"Уровень 9 cooldown: {int(s.get('super_hyper_cooldown_sec', 3600))} сек\n"
+            f"Monster 5ч: {int(s.get('monster_3h_usd', 500000))}\n"
+            f"Monster mute: {int(s.get('monster_mute_sec', 10800)) // 3600} ч\n"
             f"Буфер: {int(s.get('range_delay_sec', 30))} сек\n"
             f"Reset диапазона: {int(s.get('range_reset_sec', 900)) // 60} мин\n"
             f"Биржи сигналов: {ex}\n"
@@ -552,16 +586,17 @@ class Bot:
         header = f"<b>Топ 10 ликвидаций за 30м — {ex}</b>\n<i>с момента запуска бота</i>"
         if not rows:
             return f"{header}\n\nПока пусто от {self.fmt_usd(min_usd)}."
+
         out = [header]
-        bybit_symbols = self.bybit_symbols_cache or []
         for i, (sym, usd) in enumerate(rows, 1):
             cg = self.coinglass_link(ex, sym)
-            mapped = self.resolve_bybit_symbol(sym, bybit_symbols)
-            if mapped:
-                by = self.bybit_link(mapped)
-                out.append(f"{i}. {sym} — {self.fmt_usd(usd)} [<a href=\"{cg}\">CG</a>] [<a href=\"{by}\">BY</a>]")
+            by_sym, mode = self.resolve_bybit_symbol(sym)
+            if by_sym:
+                by = self.bybit_link(by_sym)
+                by_label = "BY" if mode == "exact" else f"BY→{by_sym}"
+                out.append(f'{i}. {sym} — {self.fmt_usd(usd)} [<a href="{cg}">CG</a>] [<a href="{by}">{by_label}</a>]')
             else:
-                out.append(f"{i}. {sym} — {self.fmt_usd(usd)} [<a href=\"{cg}\">CG</a>] [BY n/a]")
+                out.append(f'{i}. {sym} — {self.fmt_usd(usd)} [<a href="{cg}">CG</a>] [BY n/a]')
         return "\n".join(out)
 
     def help_text(self):
@@ -940,14 +975,14 @@ class Bot:
         vol1_marks = self.directional_mark(r1.get("vol_pct"), 30, 80)
         vol4_marks = self.directional_mark(r4.get("vol_pct"), 30, 80)
 
-        px1_marks = self.directional_mark(r1.get("price_pct"), 8, 20)
-        px4_marks = self.directional_mark(r4.get("price_pct"), 10, 25)
-        px24_marks = self.directional_mark(r24.get("price_pct"), 15, 35)
+        px1_marks = self.price_mark(r1.get("price_pct"), 8)
+        px4_marks = self.price_mark(r4.get("price_pct"), 10)
+        px24_marks = self.price_mark(r24.get("price_pct"), 15)
 
-        oi5_marks = self.directional_mark(oi.get("pct_5m"), 3, 8)
-
-        acct_marks = self.sentiment_accounts(long_pct, short_pct)
-        funding_marks = self.sentiment_pct(funding, 0.03, 0.08, 0.15)
+        oi5_marks = self.oi_mark(oi.get("pct_5m"), 1)
+        oi4h_marks = self.oi_mark(oi.get("pct_4h"), 1)
+        acct_long_mark, acct_short_mark = self.sentiment_accounts(long_pct, short_pct)
+        funding_marks = self.funding_mark(funding)
 
         return (
             f"<b>🏷 Капа-рейтинг:</b> {rank_text}\n\n"
@@ -960,9 +995,10 @@ class Bot:
             f"24ч: {px24_marks} {self.fmt_pct(r24.get('price_pct'))}\n\n"
             f"<b>📊 Открытый интерес:</b>\n"
             f"сейчас: {self.fmt_usd(oi.get('now'))}\n"
-            f"5м: {oi5_marks} {self.fmt_pct(oi.get('pct_5m'))}\n\n"
+            f"5м: {oi5_marks} {self.fmt_pct(oi.get('pct_5m'))}\n"
+            f"4ч: {oi4h_marks} {self.fmt_pct(oi.get('pct_4h'))}\n\n"
             f"<b>👥 Аккаунты:</b>\n"
-            f"{acct_marks} лонг: {self.fmt_pct(long_pct)} | шорт: {self.fmt_pct(short_pct)}\n\n"
+            f"{acct_long_mark} лонг: {self.fmt_pct(long_pct)} | {acct_short_mark} шорт: {self.fmt_pct(short_pct)}\n\n"
             f"<b>🩸 Фандинг:</b>\n"
             f"{funding_marks} {self.fmt_pct(funding)}"
         )
@@ -974,7 +1010,7 @@ class Bot:
             return
 
         checklist = (
-            "<b>🤖 LIQ BOT / V5.5.2_mapping_fallback</b>\n\n"
+            "<b>🤖 LIQ BOT / V5.6_flow_engine_fix</b>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -1002,6 +1038,16 @@ class Bot:
             f"15м={self.fmt_usd(snapshot['sum15'])}"
         )
 
+    def trigger_log_line(self, symbol, snapshot, hyper=False):
+        ex = snapshot["ex"]
+        level = 10 if snapshot.get("monster") else (9 if snapshot.get("super_hyper") else (8 if hyper else snapshot["level"]))
+        label = "MONSTER" if snapshot.get("monster") else ("LVL9" if snapshot.get("super_hyper") else ("LVL8" if hyper else f"LVL{level}"))
+        return (
+            f"TRIGGER {symbol} {ex} {label} "
+            f"event={self.fmt_usd(snapshot['trigger_usd'])} "
+            f"15м={self.fmt_usd(snapshot['sum15'])}"
+        )
+
     def msg_signal(self, symbol, snapshot, stats, hyper=False):
         ex = snapshot["ex"]
         symbol_safe = self.esc(symbol)
@@ -1010,14 +1056,17 @@ class Bot:
         cnt = snapshot["cnt"]
         level = snapshot["level"]
         super_hyper = snapshot.get("super_hyper", False)
-        mapped_symbol = snapshot.get("mapped_symbol")
+        monster = snapshot.get("monster", False)
 
-        if super_hyper:
-            top_line = f"🚨 9️⃣ {symbol_safe} AGG"
-            header = f"SUPER HYPER — ПОТОК — {self.fmt_usd(sum15)}"
+        if monster:
+            top_line = f"💀 🔟 {symbol_safe} AGG"
+            header = f"MONSTER — ПОТОК — {self.fmt_usd(sum15)}"
+        elif super_hyper:
+            top_line = f"☄️ 9️⃣ {symbol_safe} AGG"
+            header = f"УРОВЕНЬ 9 — ПОТОК — {self.fmt_usd(sum15)}"
         elif hyper:
-            top_line = f"🚨 8️⃣ {symbol_safe} AGG"
-            header = f"HYPER — ПОТОК — {self.fmt_usd(sum15)}"
+            top_line = f"☄️ 8️⃣ {symbol_safe} AGG"
+            header = f"УРОВЕНЬ 8 — ПОТОК — {self.fmt_usd(sum15)}"
         elif level == 1:
             top_line = f"🛑 1️⃣ {symbol_safe} {ex}"
             header = f"УРОВЕНЬ 1 — ПОТОК — {self.fmt_usd(sum15)}"
@@ -1027,20 +1076,20 @@ class Bot:
             header = f"УРОВЕНЬ {level} — ПОТОК — {self.fmt_usd(sum15)}"
 
         trigger_flow = f"💥 <b>{self.fmt_usd(sum15)} | {cnt} {self.events_word(cnt)}</b> 💥"
-
-        bybit_note = ""
-        if mapped_symbol and mapped_symbol != symbol:
-            bybit_note = f"\n⚠️ Bybit аналог: <b>{self.esc(mapped_symbol)}</b>"
-        elif not mapped_symbol:
-            bybit_note = "\n⚠️ Нет точного тикера на Bybit"
+        by_sym, mode = self.resolve_bybit_symbol(symbol)
+        mapping_note = ""
+        if mode == "mapped" and by_sym:
+            mapping_note = f"\n⚠️ Bybit аналог: <b>{self.esc(by_sym)}</b>"
+        elif mode == "na":
+            mapping_note = "\n⚠️ Нет точного тикера на Bybit"
 
         return (
             f"<b>{top_line}</b>\n"
             f"<b>{header}</b>\n\n"
             f"Событие: {self.fmt_usd(trigger_usd)}\n"
-            f"Поток 15м: {trigger_flow}{bybit_note}\n\n"
+            f"Поток 15м: {trigger_flow}{mapping_note}\n\n"
             f"{self.render_blocks(stats)}\n\n"
-            f"{self.compact_links(ex if level == 1 else 'BYBIT', symbol, mapped_symbol)}"
+            f"{self.compact_links(ex if level == 1 else 'BYBIT', symbol)}"
         )
 
     def maybe_queue_level(self, state_key, snapshot):
@@ -1049,15 +1098,15 @@ class Bot:
         if level <= 0:
             return
         current_pending = st["pending_level"]
-        if level > st["last_sent_level"] and level >= current_pending:
+        ceiling = max(st.get("last_sent_level", 0), st.get("max_level_sent", 0))
+        if level > ceiling and level >= current_pending:
             st["pending_level"] = level
             st["pending_since_ts"] = snapshot["now"]
             st["pending_snapshot"] = snapshot
-            st["last_level_change_ts"] = snapshot["now"]
 
     async def maybe_send_pending(self, symbol, state_key):
         st = self.symbol_state[state_key]
-        if st["pending_level"] <= st["last_sent_level"] or not st["pending_snapshot"]:
+        if st["pending_level"] <= max(st["last_sent_level"], st.get("max_level_sent", 0)) or not st["pending_snapshot"]:
             return
 
         delay_sec = int(self.cfg["signals"].get("range_delay_sec", 30))
@@ -1066,10 +1115,21 @@ class Bot:
             return
 
         snap = st["pending_snapshot"]
+        signature = f"{symbol}|{snap['level']}|{round(float(snap['sum15']),1)}"
+        if signature == st.get("last_sent_signature", "") and now - st.get("last_sent_ts", 0.0) < 120:
+            st["pending_level"] = 0
+            st["pending_since_ts"] = 0.0
+            st["pending_snapshot"] = None
+            return
+
         stats = await self.get_symbol_stats(symbol)
         print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
         await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
         st["last_sent_level"] = st["pending_level"]
+        st["max_level_sent"] = max(st.get("max_level_sent", 0), st["last_sent_level"])
+        st["last_level_change_ts"] = now
+        st["last_sent_signature"] = signature
+        st["last_sent_ts"] = now
         st["pending_level"] = 0
         st["pending_since_ts"] = 0.0
         st["pending_snapshot"] = None
@@ -1077,25 +1137,54 @@ class Bot:
     async def maybe_send_hyper(self, symbol, state_key, snapshot):
         st = self.symbol_state[state_key]
         now = snapshot["now"]
-        hyper_usd = float(self.cfg["signals"].get("hyper_usd", 150000))
-        super_hyper_usd = float(self.cfg["signals"].get("super_hyper_usd", 300000))
-        if snapshot["sum15"] < hyper_usd:
+        lvl8_usd = float(self.cfg["signals"].get("hyper_usd", 200000))
+        lvl9_usd = float(self.cfg["signals"].get("super_hyper_usd", 300000))
+        if snapshot["sum15"] < lvl8_usd:
             return
-        if now < st["hyper_cooldown_until"]:
+
+        is_lvl9 = snapshot["sum15"] >= lvl9_usd
+        cooldown_until = st["super_hyper_cooldown_until"] if is_lvl9 else st["hyper_cooldown_until"]
+        if now < cooldown_until:
+            return
+
+        signature = f"{symbol}|{9 if is_lvl9 else 8}|{round(float(snapshot['sum15']),1)}"
+        if signature == st.get("last_sent_signature", "") and now - st.get("last_sent_ts", 0.0) < 120:
             return
 
         stats = await self.get_symbol_stats(symbol)
-        is_super = snapshot["sum15"] >= super_hyper_usd
         snap = dict(snapshot)
-        snap["super_hyper"] = is_super
-        print(self.trigger_log_line(symbol, snap, hyper=True), flush=True)
-        await self.send(self.msg_signal(symbol, snap, stats, hyper=True))
-        st["hyper_cooldown_until"] = now + int(self.cfg["signals"].get("hyper_cooldown_sec", 600))
-        st["last_sent_level"] = max(st["last_sent_level"], 9 if is_super else 8)
+        snap["super_hyper"] = is_lvl9
+        print(self.trigger_log_line(symbol, snap, hyper=not is_lvl9), flush=True)
+        await self.send(self.msg_signal(symbol, snap, stats, hyper=not is_lvl9))
+
+        if is_lvl9:
+            st["super_hyper_cooldown_until"] = now + int(self.cfg["signals"].get("super_hyper_cooldown_sec", 3600))
+            st["last_sent_level"] = max(st["last_sent_level"], 9)
+        else:
+            st["hyper_cooldown_until"] = now + int(self.cfg["signals"].get("hyper_cooldown_sec", 0))
+            st["last_sent_level"] = max(st["last_sent_level"], 8)
+
+        st["max_level_sent"] = max(st.get("max_level_sent", 0), st["last_sent_level"])
+        st["last_level_change_ts"] = now
+        st["last_sent_signature"] = signature
+        st["last_sent_ts"] = now
         st["pending_level"] = 0
         st["pending_since_ts"] = 0.0
         st["pending_snapshot"] = None
-        st["last_level_change_ts"] = now
+
+    def update_monster(self, state_key, now, usd):
+        dq = self.events_3h[state_key]
+        dq.append((now, usd))
+        while dq and now - dq[0][0] > 18000:
+            dq.popleft()
+        total = sum(v for _, v in dq)
+        st = self.symbol_state[state_key]
+        if total >= float(self.cfg["signals"].get("monster_3h_usd", 500000)):
+            if now < st["monster_mute_until"]:
+                return True
+            st["monster_mute_until"] = now + int(self.cfg["signals"].get("monster_mute_sec", 10800))
+            return False
+        return False
 
     def update_monster(self, state_key, now, usd):
         dq = self.events_3h[state_key]
@@ -1118,9 +1207,6 @@ class Bot:
         if side == "short":
             self.market_events_30m[ex].append({"ts": now, "symbol": symbol, "usd": usd})
             self.prune_market_events(ex, now)
-
-        bybit_symbols = await self.get_all_bybit_symbols()
-        mapped_symbol = self.resolve_bybit_symbol(symbol, bybit_symbols)
 
         allowed_exchanges = set(self.cfg.get("signals", {}).get("allowed_exchanges", ["BINANCE", "BYBIT"]))
         if ex not in allowed_exchanges:
@@ -1146,11 +1232,7 @@ class Bot:
         if usd >= float(self.cfg["filters"]["min_terminal_usd"]):
             print(f"{ex:<7} {symbol:<18} SHORT {self.fmt_usd(usd)} | local1м={self.fmt_usd(local_sum1)} agg15м={self.fmt_usd(agg_sum15)}", flush=True)
 
-        if self.update_monster(state_key, now, usd):
-            return
-
         st = self.symbol_state[state_key]
-
         if self.should_reset_range(st, now):
             self.reset_range(state_key)
 
@@ -1158,21 +1240,40 @@ class Bot:
         min_event_usd = entry_threshold
         local_entry_hit = usd >= entry_threshold or local_sum1 >= entry_threshold
 
+        if usd < min_event_usd and not local_entry_hit and not st["range_active"]:
+            return
+
+        if self.update_monster(state_key, now, usd):
+            snap = {
+                "now": now,
+                "ex": ex,
+                "trigger_usd": max(usd, entry_threshold),
+                "sum15": max(agg_sum15, usd),
+                "cnt": agg_cnt,
+                "level": 10,
+                "monster": True,
+            }
+            stats = await self.get_symbol_stats(symbol)
+            print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
+            await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
+            st["last_sent_level"] = 10
+            st["max_level_sent"] = 10
+            st["last_level_change_ts"] = now
+            return
+
         if not st["range_active"]:
-            if usd < min_event_usd and not local_entry_hit:
-                return
             if not local_entry_hit:
                 return
             self.open_range(state_key, ex, now)
-            pre_level = self.compute_level(usd, max(local_sum1, agg_sum15))
+            first_sum = max(local_sum1, agg_sum15, usd)
+            first_level = max(1, self.compute_level(entry_threshold, first_sum))
             entry_snapshot = {
                 "now": now,
                 "ex": ex,
-                "trigger_usd": max(usd, entry_threshold if agg_sum15 >= entry_threshold else usd),
-                "sum15": max(local_sum1, agg_sum15),
-                "cnt": agg_cnt,
-                "level": max(1, pre_level),
-                "mapped_symbol": mapped_symbol,
+                "trigger_usd": max(usd, entry_threshold),
+                "sum15": first_sum,
+                "cnt": max(len(self.events_1m[local_key]), agg_cnt),
+                "level": first_level,
             }
             self.maybe_queue_level(state_key, entry_snapshot)
             await self.maybe_send_pending(symbol, state_key)
@@ -1182,7 +1283,7 @@ class Bot:
             await self.maybe_send_pending(symbol, state_key)
             return
 
-        level = self.compute_level(0, agg_sum15)
+        level = self.compute_level(entry_threshold, agg_sum15)
         if level < 2:
             await self.maybe_send_pending(symbol, state_key)
             return
@@ -1190,16 +1291,15 @@ class Bot:
         snapshot = {
             "now": now,
             "ex": ex,
-            "trigger_usd": max(usd, entry_threshold if agg_sum15 >= entry_threshold else usd),
+            "trigger_usd": max(usd, entry_threshold),
             "sum15": agg_sum15,
             "cnt": agg_cnt,
             "level": level,
-            "mapped_symbol": mapped_symbol,
         }
 
         await self.maybe_send_hyper(symbol, state_key, snapshot)
 
-        if level > st["last_sent_level"]:
+        if level > max(st["last_sent_level"], st.get("max_level_sent", 0)):
             self.maybe_queue_level(state_key, snapshot)
 
         await self.maybe_send_pending(symbol, state_key)
@@ -1278,7 +1378,7 @@ class Bot:
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5.5.2_mapping_fallback", flush=True)
+        print("✅ BOT STARTED / V5.6_flow_engine_fix", flush=True)
         await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
 
 

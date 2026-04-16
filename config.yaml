@@ -30,21 +30,21 @@ signals:
   range_delay_sec: 30
   range_reset_sec: 900
   hyper_5m_usd: 150000
-  hyper_cooldown_sec: 600
+  hyper_cooldown_sec: 0
   monster_3h_usd: 500000
-  monster_mute_sec: 18000
+  monster_mute_sec: 10800
   allowed_exchanges:
   - BINANCE
   - BYBIT
   level_2_usd: 15000
   level_3_usd: 30000
   level_4_usd: 50000
-  level_5_usd: 70000
-  level_6_usd: 90000
-  level_7_usd: 110000
-  hyper_usd: 150000
+  level_5_usd: 90000
+  level_6_usd: 120000
+  level_7_usd: 150000
+  hyper_usd: 200000
   super_hyper_usd: 300000
-  super_hyper_cooldown_sec: 900
+  super_hyper_cooldown_sec: 3600
 runtime:
   watchdog_enabled: true
   watchdog_no_data_sec: 180
