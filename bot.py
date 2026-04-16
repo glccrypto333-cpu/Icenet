@@ -421,6 +421,11 @@ class Bot:
             10: "🔟",
         }
         return badges.get(level, str(level))
+    def signal_power_bar(self, level):
+        badges = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+        lvl = max(1, min(10, int(level)))
+        return "".join(badges[i] if i < lvl else "⬜️" for i in range(10))
+
     def compute_level(self, trigger_usd, sum15, _unused1=0, _unused2=0):
         if sum15 >= float(self.cfg["signals"].get("level_7_usd", 150000)):
             return 7
@@ -1071,7 +1076,7 @@ class Bot:
             return
 
         checklist = (
-            "<b>🤖 LIQ BOT / V5.6.2_export_antispam</b>\n\n"
+            "<b>🤖 LIQ BOT / V5.6.3_tiger_startup</b>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -1134,9 +1139,13 @@ class Bot:
         elif mode == "na":
             mapping_note = "\n⚠️ Нет точного тикера на Bybit"
 
+        bar_level = 10 if monster else (9 if super_hyper else (8 if hyper else level))
+        power_bar = self.signal_power_bar(bar_level)
+
         return (
             f"<b>{top_line}</b>\n"
             f"<b>{header}</b>\n"
+            f"{power_bar}\n\n"
             f"Событие: {self.fmt_usd(trigger_usd)}\n"
             f"Поток 15м: {trigger_flow}{mapping_note}\n\n"
             f"{self.render_blocks(stats)}\n\n"
@@ -1474,7 +1483,7 @@ class Bot:
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5.6.2_export_antispam", flush=True)
+        print("✅ BOT STARTED / V5.6.3_tiger_startup", flush=True)
         await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
 
 
