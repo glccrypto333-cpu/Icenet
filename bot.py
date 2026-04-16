@@ -4,6 +4,8 @@
 import atexit
 import asyncio
 import html
+import csv
+import io
 import json
 import os
 import signal
@@ -419,15 +421,6 @@ class Bot:
             10: "🔟",
         }
         return badges.get(level, str(level))
-
-    def signal_power_bar(self, level):
-        full = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-        lvl = max(1, min(10, int(level)))
-        out = []
-        for i in range(10):
-            out.append(full[i] if i < lvl else "⬜️")
-        return "".join(out)
-
     def compute_level(self, trigger_usd, sum15, _unused1=0, _unused2=0):
         if sum15 >= float(self.cfg["signals"].get("level_7_usd", 150000)):
             return 7
@@ -551,6 +544,7 @@ class Bot:
         ex = ",".join(s.get("allowed_exchanges", ["BINANCE", "BYBIT"]))
         mode = str(self.cfg.get("runtime", {}).get("signal_mode", "combat"))
         mode_text = "Fast test" if mode == "fast_test" else "Боевой"
+        min_event_effective = 500 if mode == "fast_test" else 9000
         return (
             "<b>Текущие лимиты</b>\n\n"
             f"Режим: {mode_text}\n"
@@ -570,7 +564,7 @@ class Bot:
             f"Reset диапазона: {int(s.get('range_reset_sec', 900)) // 60} мин\n"
             f"Биржи сигналов: {ex}\n"
             f"Терминал: {int(f.get('min_terminal_usd', 10000))}\n"
-            f"Мин. событие: {int(f.get('min_event_usd', 9000))}\n"
+            f"Мин. событие: {int(min_event_effective)}\n"
             f"Top 10 минимум: {int(f.get('top30_min_usd', 3000))}"
         )
 
@@ -646,25 +640,37 @@ class Bot:
 
     def export_signals_text(self):
         now = time.time()
-        items = [row for row in list(self.signal_history) if now - row.get("ts", 0) <= 86400]
+        items = [row for row in list(self.signal_history) if now - row.get('ts', 0) <= 86400]
         if not items:
             return "<b>Сигналы за 24ч</b>\n\nПока пусто."
         out = ["<b>Сигналы за 24ч</b>\n"]
-        for i, row in enumerate(items[-300:], 1):
+        for i, row in enumerate(items[-250:], 1):
             out.append(
                 f"{i}. {row.get('time','')} | {row.get('symbol','')} | {row.get('exchange','')} | "
-                f"{row.get('label','')} | event={row.get('event','')} | flow={row.get('flow','')} | cnt={row.get('cnt','')}"
+                f"{row.get('label','')} | event={row.get('event','')} | flow={row.get('flow','')} | cnt={row.get('cnt','')} | "
+                f"mode={row.get('mode','')} | bybit={row.get('mapped','')} | tg={row.get('message_id','')} | "
+                f"rank={row.get('rank','')} | p1h={row.get('price_1h','')} | p4h={row.get('price_4h','')} | "
+                f"p24h={row.get('price_24h','')} | oi5m={row.get('oi_5m','')} | oi4h={row.get('oi_4h','')} | "
+                f"long={row.get('long_pct','')} | short={row.get('short_pct','')} | funding={row.get('funding','')}"
             )
         return "\n".join(out)
 
+    def export_signals_csv_text(self):
+        now = time.time()
+        items = [row for row in list(self.signal_history) if now - row.get('ts', 0) <= 86400]
+        cols = ['time','symbol','exchange','label','event','flow','cnt','mode','mapped','message_id','rank','price_1h','price_4h','price_24h','oi_now','oi_5m','oi_4h','long_pct','short_pct','funding']
+        sio = io.StringIO()
+        w = csv.DictWriter(sio, fieldnames=cols)
+        w.writeheader()
+        for row in items:
+            w.writerow({c: row.get(c, '') for c in cols})
+        return sio.getvalue()
+
     def apply_signal_mode(self, mode_name):
-        self.cfg.setdefault("runtime", {})
-        self.cfg.setdefault("filters", {})
-        self.cfg["runtime"]["signal_mode"] = mode_name
-        if mode_name == "fast_test":
-            self.cfg["filters"]["min_event_usd"] = 500
-        else:
-            self.cfg["filters"]["min_event_usd"] = int(self.cfg.get("signals", {}).get("liq_level_1_usd", 9000))
+        self.cfg.setdefault('runtime', {})
+        self.cfg.setdefault('filters', {})
+        self.cfg['runtime']['signal_mode'] = mode_name
+        self.cfg['filters']['min_event_usd'] = 500 if mode_name == 'fast_test' else 9000
         return self.format_limits()
 
     async def handle_control_command(self, text):
@@ -689,9 +695,9 @@ class Bot:
                 return f"❌ Ошибка: {e}\nПовтори ввод или нажми ↩️ Назад", self.limit_menu
 
         if text in ("/export_24h", "📤 Сигналы 24ч"):
-            return self.export_signals_text(), self.keyboard
+            return self.export_signals_text() + "\n\n<b>CSV 24ч</b>\n<code>" + html.escape(self.export_signals_csv_text()[:3000]) + "</code>", self.keyboard
         if text in ("⚙️ Режим", "/mode"):
-            return "<b>Выбор режима</b>\n\n🟢 Боевой — мин. событие = ликвидация 1\n🟡 Fast test — мин. событие = 500", self.mode_menu
+            return "<b>Выбор режима</b>\n\n🟢 Боевой — мин. событие = 9000\n🟡 Fast test — мин. событие = 500", self.mode_menu
         if text == "🟢 Боевой":
             return "✅ Режим переключен: <b>Боевой</b>\n\n" + self.apply_signal_mode("combat"), self.keyboard
         if text == "🟡 Fast test":
@@ -795,6 +801,10 @@ class Bot:
                     self.health["last_telegram_ok_ts"] = time.time()
                     self.health["signals_sent"] += 1
                     self.write_health()
+                    try:
+                        return json.loads(body).get("result", {}).get("message_id")
+                    except Exception:
+                        return None
 
     # ========= external data =========
     async def get_all_bybit_symbols(self):
@@ -1061,7 +1071,7 @@ class Bot:
             return
 
         checklist = (
-            "<b>🤖 LIQ BOT / V5.6.1_ui_control_completion</b>\n\n"
+            "<b>🤖 LIQ BOT / V5.6.2_export_antispam</b>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -1124,11 +1134,9 @@ class Bot:
         elif mode == "na":
             mapping_note = "\n⚠️ Нет точного тикера на Bybit"
 
-        power_line = self.signal_power_bar(10 if monster else (9 if super_hyper else (8 if hyper else level)))
         return (
             f"<b>{top_line}</b>\n"
             f"<b>{header}</b>\n"
-            f"<b>МОЩНОСТЬ СИГНАЛА:</b> {power_line}\n\n"
             f"Событие: {self.fmt_usd(trigger_usd)}\n"
             f"Поток 15м: {trigger_flow}{mapping_note}\n\n"
             f"{self.render_blocks(stats)}\n\n"
@@ -1167,11 +1175,28 @@ class Bot:
 
         stats = await self.get_symbol_stats(symbol)
         print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
-        await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
+        message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
+        tf = stats.get("tf", {})
+        oi = stats.get("oi", {})
+        ratio = stats.get("ratio", {})
+        by_sym, _mode = self.resolve_bybit_symbol(symbol)
         self.signal_history.append({
             "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
             "symbol": symbol, "exchange": snap["ex"], "label": f"LVL{snap['level']}",
-            "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"]
+            "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"],
+            "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
+            "mapped": by_sym or "BY n/a",
+            "message_id": message_id or "",
+            "rank": stats.get("rank",""),
+            "price_1h": self.fmt_pct(tf.get("1ч", {}).get("price_pct")),
+            "price_4h": self.fmt_pct(tf.get("4ч", {}).get("price_pct")),
+            "price_24h": self.fmt_pct(tf.get("24ч", {}).get("price_pct")),
+            "oi_now": self.fmt_usd(oi.get("now")),
+            "oi_5m": self.fmt_pct(oi.get("pct_5m")),
+            "oi_4h": self.fmt_pct(oi.get("pct_4h")),
+            "long_pct": self.fmt_pct(ratio.get("long")),
+            "short_pct": self.fmt_pct(ratio.get("short")),
+            "funding": self.fmt_pct(stats.get("funding")),
         })
         st["last_sent_level"] = st["pending_level"]
         st["max_level_sent"] = max(st.get("max_level_sent", 0), st["last_sent_level"])
@@ -1203,11 +1228,28 @@ class Bot:
         snap = dict(snapshot)
         snap["super_hyper"] = is_lvl9
         print(self.trigger_log_line(symbol, snap, hyper=not is_lvl9), flush=True)
-        await self.send(self.msg_signal(symbol, snap, stats, hyper=not is_lvl9))
+        message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=not is_lvl9))
+        tf = stats.get("tf", {})
+        oi = stats.get("oi", {})
+        ratio = stats.get("ratio", {})
+        by_sym, _mode = self.resolve_bybit_symbol(symbol)
         self.signal_history.append({
             "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
             "symbol": symbol, "exchange": snap["ex"], "label": ("LVL9" if is_lvl9 else "LVL8"),
-            "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"]
+            "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"],
+            "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
+            "mapped": by_sym or "BY n/a",
+            "message_id": message_id or "",
+            "rank": stats.get("rank",""),
+            "price_1h": self.fmt_pct(tf.get("1ч", {}).get("price_pct")),
+            "price_4h": self.fmt_pct(tf.get("4ч", {}).get("price_pct")),
+            "price_24h": self.fmt_pct(tf.get("24ч", {}).get("price_pct")),
+            "oi_now": self.fmt_usd(oi.get("now")),
+            "oi_5m": self.fmt_pct(oi.get("pct_5m")),
+            "oi_4h": self.fmt_pct(oi.get("pct_4h")),
+            "long_pct": self.fmt_pct(ratio.get("long")),
+            "short_pct": self.fmt_pct(ratio.get("short")),
+            "funding": self.fmt_pct(stats.get("funding")),
         })
 
         if is_lvl9:
@@ -1291,7 +1333,7 @@ class Bot:
 
         entry_threshold = float(self.cfg["signals"].get("liq_level_1_usd", 9000))
         mode_name = str(self.cfg.get("runtime", {}).get("signal_mode", "combat"))
-        min_event_usd = 500.0 if mode_name == "fast_test" else entry_threshold
+        min_event_usd = 500.0 if mode_name == "fast_test" else 9000.0
         local_entry_hit = usd >= entry_threshold or local_sum1 >= entry_threshold
 
         if usd < min_event_usd and not local_entry_hit and not st["range_active"]:
@@ -1432,7 +1474,7 @@ class Bot:
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5.6.1_ui_control_completion", flush=True)
+        print("✅ BOT STARTED / V5.6.2_export_antispam", flush=True)
         await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
 
 
