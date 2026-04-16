@@ -127,6 +127,7 @@ class Bot:
         self.stop_event = asyncio.Event()
         self.startup_telegram_sent = False
         self.market_events_30m = {"BINANCE": deque(), "BYBIT": deque()}
+        self.signal_history = deque(maxlen=5000)
         self.control_state = {"awaiting_key": None}
         self.limit_button_map = {
             "1️⃣ Уровень 1": "signals.liq_level_1_usd",
@@ -136,10 +137,10 @@ class Bot:
             "5️⃣ Уровень 5": "signals.level_5_usd",
             "6️⃣ Уровень 6": "signals.level_6_usd",
             "7️⃣ Уровень 7": "signals.level_7_usd",
-            "🚨 Super Hyper": "signals.hyper_usd",
-            "⏱ Hyper cooldown": "signals.hyper_cooldown_sec",
+            "☄️ Уровень 8": "signals.hyper_usd",
+            "🚨 Super Hyper": "signals.super_hyper_usd",
             "⏱ Super Hyper cooldown": "signals.super_hyper_cooldown_sec",
-            "🐋 Monster": "signals.super_hyper_usd",
+            "🐋 Monster": "signals.monster_3h_usd",
             "⏱ Monster mute": "signals.monster_mute_sec",
         }
         self.allowed_override_keys = {
@@ -153,7 +154,6 @@ class Bot:
             "signals.level_6_usd": int,
             "signals.level_7_usd": int,
             "signals.hyper_usd": int,
-            "signals.hyper_cooldown_sec": int,
             "signals.super_hyper_cooldown_sec": int,
             "signals.super_hyper_usd": int,
             "signals.monster_3h_usd": int,
@@ -165,8 +165,17 @@ class Bot:
         self.keyboard = {
             "keyboard": [
                 [{"text": "🏆 BINANCE /30м"}, {"text": "🏆 BYBIT /30м"}],
-                [{"text": "📊 Лимиты"}],
+                [{"text": "📊 Лимиты"}, {"text": "📤 Сигналы 24ч"}],
+                [{"text": "⚙️ Режим"}],
                 [{"text": "🔄 Reload"}, {"text": "❓ Help"}],
+            ],
+            "resize_keyboard": True,
+            "is_persistent": True,
+        }
+        self.mode_menu = {
+            "keyboard": [
+                [{"text": "🟢 Боевой"}, {"text": "🟡 Fast test"}],
+                [{"text": "↩️ Назад"}],
             ],
             "resize_keyboard": True,
             "is_persistent": True,
@@ -176,8 +185,8 @@ class Bot:
                 [{"text": "1️⃣ Уровень 1"}, {"text": "2️⃣ Уровень 2"}],
                 [{"text": "3️⃣ Уровень 3"}, {"text": "4️⃣ Уровень 4"}],
                 [{"text": "5️⃣ Уровень 5"}, {"text": "6️⃣ Уровень 6"}],
-                [{"text": "7️⃣ Уровень 7"}, {"text": "🚨 Super Hyper"}],
-                [{"text": "⏱ Hyper cooldown"}, {"text": "⏱ Super Hyper cooldown"}],
+                [{"text": "7️⃣ Уровень 7"}, {"text": "☄️ Уровень 8"}],
+                [{"text": "🚨 Super Hyper"}, {"text": "⏱ Super Hyper cooldown"}],
                 [{"text": "🐋 Monster"}, {"text": "⏱ Monster mute"}],
                 [{"text": "↩️ Назад"}],
             ],
@@ -411,6 +420,14 @@ class Bot:
         }
         return badges.get(level, str(level))
 
+    def signal_power_bar(self, level):
+        full = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+        lvl = max(1, min(10, int(level)))
+        out = []
+        for i in range(10):
+            out.append(full[i] if i < lvl else "⬜️")
+        return "".join(out)
+
     def compute_level(self, trigger_usd, sum15, _unused1=0, _unused2=0):
         if sum15 >= float(self.cfg["signals"].get("level_7_usd", 150000)):
             return 7
@@ -532,8 +549,11 @@ class Bot:
         s = self.cfg.get("signals", {})
         f = self.cfg.get("filters", {})
         ex = ",".join(s.get("allowed_exchanges", ["BINANCE", "BYBIT"]))
+        mode = str(self.cfg.get("runtime", {}).get("signal_mode", "combat"))
+        mode_text = "Fast test" if mode == "fast_test" else "Боевой"
         return (
             "<b>Текущие лимиты</b>\n\n"
+            f"Режим: {mode_text}\n"
             f"Ликвидация 1: {int(s.get('liq_level_1_usd', 9000))}\n"
             f"Уровень 2: {int(s.get('level_2_usd', 15000))}\n"
             f"Уровень 3: {int(s.get('level_3_usd', 30000))}\n"
@@ -541,9 +561,8 @@ class Bot:
             f"Уровень 5: {int(s.get('level_5_usd', 90000))}\n"
             f"Уровень 6: {int(s.get('level_6_usd', 120000))}\n"
             f"Уровень 7: {int(s.get('level_7_usd', 150000))}\n"
-            f"Уровень 8 (5м): {int(s.get('hyper_usd', 200000))}\n"
-            f"Уровень 9 (3ч): {int(s.get('super_hyper_usd', 300000))}\n"
-            f"Уровень 8 cooldown: {int(s.get('hyper_cooldown_sec', 0))} сек\n"
+            f"Уровень 8 (маркер 5м): {int(s.get('hyper_usd', 200000))}\n"
+            f"Уровень 9 (Super Hyper): {int(s.get('super_hyper_usd', 300000))}\n"
             f"Уровень 9 cooldown: {int(s.get('super_hyper_cooldown_sec', 3600))} сек\n"
             f"Monster 5ч: {int(s.get('monster_3h_usd', 500000))}\n"
             f"Monster mute: {int(s.get('monster_mute_sec', 10800)) // 3600} ч\n"
@@ -551,7 +570,7 @@ class Bot:
             f"Reset диапазона: {int(s.get('range_reset_sec', 900)) // 60} мин\n"
             f"Биржи сигналов: {ex}\n"
             f"Терминал: {int(f.get('min_terminal_usd', 10000))}\n"
-            f"Мин. событие: {int(s.get('liq_level_1_usd', 9000))}\n"
+            f"Мин. событие: {int(f.get('min_event_usd', 9000))}\n"
             f"Top 10 минимум: {int(f.get('top30_min_usd', 3000))}"
         )
 
@@ -625,6 +644,29 @@ class Bot:
                 print(f"Telegram {method}: {resp.status}", flush=True)
                 return data
 
+    def export_signals_text(self):
+        now = time.time()
+        items = [row for row in list(self.signal_history) if now - row.get("ts", 0) <= 86400]
+        if not items:
+            return "<b>Сигналы за 24ч</b>\n\nПока пусто."
+        out = ["<b>Сигналы за 24ч</b>\n"]
+        for i, row in enumerate(items[-300:], 1):
+            out.append(
+                f"{i}. {row.get('time','')} | {row.get('symbol','')} | {row.get('exchange','')} | "
+                f"{row.get('label','')} | event={row.get('event','')} | flow={row.get('flow','')} | cnt={row.get('cnt','')}"
+            )
+        return "\n".join(out)
+
+    def apply_signal_mode(self, mode_name):
+        self.cfg.setdefault("runtime", {})
+        self.cfg.setdefault("filters", {})
+        self.cfg["runtime"]["signal_mode"] = mode_name
+        if mode_name == "fast_test":
+            self.cfg["filters"]["min_event_usd"] = 500
+        else:
+            self.cfg["filters"]["min_event_usd"] = int(self.cfg.get("signals", {}).get("liq_level_1_usd", 9000))
+        return self.format_limits()
+
     async def handle_control_command(self, text):
         text = (text or "").strip()
 
@@ -645,6 +687,15 @@ class Bot:
                 return f"✅ Обновлено\n<code>{key} = {parsed}</code>", self.limit_menu
             except Exception as e:
                 return f"❌ Ошибка: {e}\nПовтори ввод или нажми ↩️ Назад", self.limit_menu
+
+        if text in ("/export_24h", "📤 Сигналы 24ч"):
+            return self.export_signals_text(), self.keyboard
+        if text in ("⚙️ Режим", "/mode"):
+            return "<b>Выбор режима</b>\n\n🟢 Боевой — мин. событие = ликвидация 1\n🟡 Fast test — мин. событие = 500", self.mode_menu
+        if text == "🟢 Боевой":
+            return "✅ Режим переключен: <b>Боевой</b>\n\n" + self.apply_signal_mode("combat"), self.keyboard
+        if text == "🟡 Fast test":
+            return "✅ Режим переключен: <b>Fast test</b>\n\n" + self.apply_signal_mode("fast_test"), self.keyboard
 
         if text in ("/limits", "📊 Лимиты"):
             return self.format_limits(), self.limit_menu
@@ -1010,7 +1061,7 @@ class Bot:
             return
 
         checklist = (
-            "<b>🤖 LIQ BOT / V5.6_flow_engine_fix</b>\n\n"
+            "<b>🤖 LIQ BOT / V5.6.1_ui_control_completion</b>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -1027,16 +1078,6 @@ class Bot:
             await self.send(checklist, reply_markup=self.keyboard)
         finally:
             self.startup_telegram_sent = True
-
-    def trigger_log_line(self, symbol, snapshot, hyper=False):
-        ex = snapshot["ex"]
-        level = 9 if snapshot.get("super_hyper") else (8 if hyper else snapshot["level"])
-        label = "SUPER_HYPER" if snapshot.get("super_hyper") else ("HYPER" if hyper else f"LVL{level}")
-        return (
-            f"TRIGGER {symbol} {ex} {label} "
-            f"event={self.fmt_usd(snapshot['trigger_usd'])} "
-            f"15м={self.fmt_usd(snapshot['sum15'])}"
-        )
 
     def trigger_log_line(self, symbol, snapshot, hyper=False):
         ex = snapshot["ex"]
@@ -1062,11 +1103,11 @@ class Bot:
             top_line = f"💀 🔟 {symbol_safe} AGG"
             header = f"MONSTER — ПОТОК — {self.fmt_usd(sum15)}"
         elif super_hyper:
-            top_line = f"☄️ 9️⃣ {symbol_safe} AGG"
-            header = f"УРОВЕНЬ 9 — ПОТОК — {self.fmt_usd(sum15)}"
+            top_line = f"🚨 9️⃣ {symbol_safe} AGG"
+            header = f"SUPER HYPER — ПОТОК — {self.fmt_usd(sum15)}"
         elif hyper:
             top_line = f"☄️ 8️⃣ {symbol_safe} AGG"
-            header = f"УРОВЕНЬ 8 — ПОТОК — {self.fmt_usd(sum15)}"
+            header = f"УРОВЕНЬ 8 — МАРКЕР РЫНКА — {self.fmt_usd(sum15)}"
         elif level == 1:
             top_line = f"🛑 1️⃣ {symbol_safe} {ex}"
             header = f"УРОВЕНЬ 1 — ПОТОК — {self.fmt_usd(sum15)}"
@@ -1083,9 +1124,11 @@ class Bot:
         elif mode == "na":
             mapping_note = "\n⚠️ Нет точного тикера на Bybit"
 
+        power_line = self.signal_power_bar(10 if monster else (9 if super_hyper else (8 if hyper else level)))
         return (
             f"<b>{top_line}</b>\n"
-            f"<b>{header}</b>\n\n"
+            f"<b>{header}</b>\n"
+            f"<b>МОЩНОСТЬ СИГНАЛА:</b> {power_line}\n\n"
             f"Событие: {self.fmt_usd(trigger_usd)}\n"
             f"Поток 15м: {trigger_flow}{mapping_note}\n\n"
             f"{self.render_blocks(stats)}\n\n"
@@ -1125,6 +1168,11 @@ class Bot:
         stats = await self.get_symbol_stats(symbol)
         print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
         await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
+        self.signal_history.append({
+            "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
+            "symbol": symbol, "exchange": snap["ex"], "label": f"LVL{snap['level']}",
+            "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"]
+        })
         st["last_sent_level"] = st["pending_level"]
         st["max_level_sent"] = max(st.get("max_level_sent", 0), st["last_sent_level"])
         st["last_level_change_ts"] = now
@@ -1156,6 +1204,11 @@ class Bot:
         snap["super_hyper"] = is_lvl9
         print(self.trigger_log_line(symbol, snap, hyper=not is_lvl9), flush=True)
         await self.send(self.msg_signal(symbol, snap, stats, hyper=not is_lvl9))
+        self.signal_history.append({
+            "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
+            "symbol": symbol, "exchange": snap["ex"], "label": ("LVL9" if is_lvl9 else "LVL8"),
+            "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"]
+        })
 
         if is_lvl9:
             st["super_hyper_cooldown_until"] = now + int(self.cfg["signals"].get("super_hyper_cooldown_sec", 3600))
@@ -1237,7 +1290,8 @@ class Bot:
             self.reset_range(state_key)
 
         entry_threshold = float(self.cfg["signals"].get("liq_level_1_usd", 9000))
-        min_event_usd = entry_threshold
+        mode_name = str(self.cfg.get("runtime", {}).get("signal_mode", "combat"))
+        min_event_usd = 500.0 if mode_name == "fast_test" else entry_threshold
         local_entry_hit = usd >= entry_threshold or local_sum1 >= entry_threshold
 
         if usd < min_event_usd and not local_entry_hit and not st["range_active"]:
@@ -1378,7 +1432,7 @@ class Bot:
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5.6_flow_engine_fix", flush=True)
+        print("✅ BOT STARTED / V5.6.1_ui_control_completion", flush=True)
         await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
 
 

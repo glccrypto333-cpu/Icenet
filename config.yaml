@@ -50,6 +50,7 @@ runtime:
   watchdog_no_data_sec: 180
   startup_grace_sec: 120
   control_enabled: true
+  signal_mode: combat
 symbols:
   blacklist:
   - BTCUSDT
