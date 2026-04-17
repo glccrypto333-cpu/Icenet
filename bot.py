@@ -180,7 +180,7 @@ class Bot:
         }
         self.mode_menu = {
             "keyboard": [
-                [{"text": "🟢 Боевой"}, {"text": "🟡 Fast test"}],
+                [{"text": "🟢 Normal"}, {"text": "🟡 Fast test"}],
                 [{"text": "🟠 Power day"}],
                 [{"text": "↩️ Назад"}],
             ],
@@ -559,12 +559,13 @@ class Bot:
         f = self.cfg.get("filters", {})
         ex = ",".join(s.get("allowed_exchanges", ["BINANCE", "BYBIT"]))
         mode = str(self.cfg.get("runtime", {}).get("signal_mode", "combat"))
-        mode_text = "Fast test" if mode == "fast_test" else ("Power day" if mode == "power_day" else "Боевой")
+        mode_text = "Fast test" if mode == "fast_test" else ("Power day" if mode == "power_day" else "Normal")
         min_event_effective = 500 if mode == "fast_test" else (25000 if mode == "power_day" else 9000)
+        flow_level_1 = int(s.get("level_1_flow_usd", s.get("liq_level_1_usd", 9000)))
         return (
             "<b>Текущие лимиты</b>\n\n"
             f"Режим: {mode_text}\n"
-            f"Ликвидация 1: {int(s.get('liq_level_1_usd', 9000))}\n"
+            f"Ликвидация 1: {int(s.get('liq_level_1_usd', 9000))} или поток {flow_level_1}\n"
             f"Уровень 2: {int(s.get('level_2_usd', 15000))}\n"
             f"Уровень 3: {int(s.get('level_3_usd', 30000))}\n"
             f"Уровень 4: {int(s.get('level_4_usd', 50000))}\n"
@@ -690,21 +691,26 @@ class Bot:
         self.cfg["runtime"]["signal_mode"] = mode_name
 
         if mode_name == "fast_test":
-            self.cfg["signals"]["liq_level_1_usd"] = 9000
-            self.cfg["signals"]["level_2_usd"] = 15000
-            self.cfg["signals"]["level_3_usd"] = 30000
-            self.cfg["signals"]["level_4_usd"] = 50000
-            self.cfg["signals"]["level_5_usd"] = 90000
-            self.cfg["signals"]["level_6_usd"] = 120000
-            self.cfg["signals"]["level_7_usd"] = 150000
-            self.cfg["signals"]["hyper_usd"] = 200000
-            self.cfg["signals"]["super_hyper_usd"] = 300000
+            self.cfg["signals"]["liq_level_1_usd"] = 500
+            self.cfg["signals"]["level_1_flow_usd"] = 500
+            self.cfg["signals"]["level_2_usd"] = 1000
+            self.cfg["signals"]["level_3_usd"] = 2000
+            self.cfg["signals"]["level_4_usd"] = 3000
+            self.cfg["signals"]["level_5_usd"] = 4000
+            self.cfg["signals"]["level_6_usd"] = 5000
+            self.cfg["signals"]["level_7_usd"] = 10000
+            self.cfg["signals"]["hyper_usd"] = 20000
+            self.cfg["signals"]["super_hyper_usd"] = 30000
+            self.cfg["signals"]["hyper_cooldown_sec"] = 300
             self.cfg["signals"]["super_hyper_cooldown_sec"] = 3600
-            self.cfg["signals"]["monster_3h_usd"] = 500000
+            self.cfg["signals"]["monster_3h_usd"] = 50000
             self.cfg["signals"]["monster_mute_sec"] = 10800
+            self.cfg["signals"]["range_delay_sec"] = 30
+            self.cfg["signals"]["range_reset_sec"] = 900
             self.cfg["filters"]["min_event_usd"] = 500
         elif mode_name == "power_day":
             self.cfg["signals"]["liq_level_1_usd"] = 25000
+            self.cfg["signals"]["level_1_flow_usd"] = 25000
             self.cfg["signals"]["level_2_usd"] = 35000
             self.cfg["signals"]["level_3_usd"] = 50000
             self.cfg["signals"]["level_4_usd"] = 90000
@@ -713,12 +719,16 @@ class Bot:
             self.cfg["signals"]["level_7_usd"] = 180000
             self.cfg["signals"]["hyper_usd"] = 200000
             self.cfg["signals"]["super_hyper_usd"] = 300000
+            self.cfg["signals"]["hyper_cooldown_sec"] = 300
             self.cfg["signals"]["super_hyper_cooldown_sec"] = 3600
             self.cfg["signals"]["monster_3h_usd"] = 500000
             self.cfg["signals"]["monster_mute_sec"] = 10800
+            self.cfg["signals"]["range_delay_sec"] = 30
+            self.cfg["signals"]["range_reset_sec"] = 900
             self.cfg["filters"]["min_event_usd"] = 25000
         else:
             self.cfg["signals"]["liq_level_1_usd"] = 9000
+            self.cfg["signals"]["level_1_flow_usd"] = 10000
             self.cfg["signals"]["level_2_usd"] = 15000
             self.cfg["signals"]["level_3_usd"] = 30000
             self.cfg["signals"]["level_4_usd"] = 50000
@@ -727,9 +737,12 @@ class Bot:
             self.cfg["signals"]["level_7_usd"] = 150000
             self.cfg["signals"]["hyper_usd"] = 200000
             self.cfg["signals"]["super_hyper_usd"] = 300000
+            self.cfg["signals"]["hyper_cooldown_sec"] = 300
             self.cfg["signals"]["super_hyper_cooldown_sec"] = 3600
             self.cfg["signals"]["monster_3h_usd"] = 500000
             self.cfg["signals"]["monster_mute_sec"] = 10800
+            self.cfg["signals"]["range_delay_sec"] = 30
+            self.cfg["signals"]["range_reset_sec"] = 900
             self.cfg["filters"]["min_event_usd"] = 9000
         self.cfg["filters"]["top30_min_usd"] = 3000
         return self.format_limits()
@@ -761,9 +774,9 @@ class Bot:
             ok = await self.send_document_text(fname, payload, caption="<b>Сигналы за 24ч</b>")
             return ("✅ Файл с сигналами за 24ч отправлен." if ok else "❌ Не удалось отправить файл."), self.keyboard
         if text in ("⚙️ Режим", "/mode"):
-            return "<b>Выбор режима</b>\n\n🟢 Боевой — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000", self.mode_menu
-        if text == "🟢 Боевой":
-            return "✅ Режим переключен: <b>Боевой</b>\n\n" + self.apply_signal_mode("combat"), self.keyboard
+            return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000", self.mode_menu
+        if text == "🟢 Normal":
+            return "✅ Режим переключен: <b>Normal</b>\n\n" + self.apply_signal_mode("combat"), self.keyboard
         if text == "🟡 Fast test":
             return "✅ Режим переключен: <b>Fast test</b>\n\n" + self.apply_signal_mode("fast_test"), self.keyboard
         if text == "🟠 Power day":
@@ -1145,8 +1158,7 @@ class Bot:
             f"1ч: {px1_marks} {self.fmt_pct(r1.get('price_pct'))}\n"
             f"4ч: {px4_marks} {self.fmt_pct(r4.get('price_pct'))}\n"
             f"24ч: {px24_marks} {self.fmt_pct(r24.get('price_pct'))}\n\n"
-            f"<b>📊 Открытый интерес:</b>\n"
-            f"сейчас: {self.fmt_usd(oi.get('now'))}\n"
+            f"<b>📊 Открытый интерес:</b> сейчас: {self.fmt_usd(oi.get('now'))}\n"
             f"5м: {oi5_marks} {self.fmt_pct(oi.get('pct_5m'))}\n"
             f"4ч: {oi4h_marks} {self.fmt_pct(oi.get('pct_4h'))}\n\n"
             f"<b>👥 Аккаунты:</b>\n"
@@ -1162,7 +1174,7 @@ class Bot:
             return
 
         checklist = (
-            "<b>🤖 Mighty Tiger / V5.6.5_clean_state_engine</b>\n<i>Ggrrr... Liquidity jungle hunter</i>\n\n"
+            "<b>🤖 Mighty Tiger / V5.6.6_modes_visual</b>\n<i>Ggrrr... Liquidity jungle hunter</i>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -1201,21 +1213,21 @@ class Bot:
         monster = snapshot.get("monster", False)
 
         if monster:
-            top_line = f"💀 🔟 {symbol_safe} AGG"
-            header = f"MONSTER — ПОТОК — {self.fmt_usd(sum15)}"
+            top_line = f"💀 {symbol_safe} AGG - {self.fmt_usd(sum15)}"
+            header = f"MONSTER {self.signal_power_bar(10)}"
         elif super_hyper:
-            top_line = f"🚨 9️⃣ {symbol_safe} AGG"
-            header = f"SUPER HYPER — ПОТОК — {self.fmt_usd(sum15)}"
+            top_line = f"🚨 {symbol_safe} AGG - {self.fmt_usd(sum15)}"
+            header = f"LVL9 {self.signal_power_bar(9)}"
         elif hyper:
-            top_line = f"☄️ 8️⃣ {symbol_safe} AGG"
-            header = f"УРОВЕНЬ 8 — МАРКЕР РЫНКА — {self.fmt_usd(sum15)}"
+            top_line = f"☄️ {symbol_safe} AGG - {self.fmt_usd(sum15)}"
+            header = f"LVL8 {self.signal_power_bar(8)}"
         elif level == 1:
-            top_line = f"🛑 1️⃣ {symbol_safe} {ex}"
-            header = f"УРОВЕНЬ 1 — ПОТОК — {self.fmt_usd(sum15)}"
+            top_line = f"🛑 {symbol_safe} {ex} - {self.fmt_usd(sum15)}"
+            header = f"LVL1 {self.signal_power_bar(1)}"
         else:
             icon = "🛑" if level <= 3 else ("🔥" if level <= 5 else "☄️")
-            top_line = f"{icon} {self.level_badge(level)} {symbol_safe} AGG"
-            header = f"УРОВЕНЬ {level} — ПОТОК — {self.fmt_usd(sum15)}"
+            top_line = f"{icon} {symbol_safe} AGG - {self.fmt_usd(sum15)}"
+            header = f"LVL{level} {self.signal_power_bar(level)}"
 
         trigger_flow = f"💥 <b>{self.fmt_usd(sum15)} | {cnt} {self.events_word(cnt)}</b> 💥"
         by_sym, mode = self.resolve_bybit_symbol(symbol)
@@ -1225,17 +1237,14 @@ class Bot:
         elif mode == "na":
             mapping_note = "\n⚠️ Нет точного тикера на Bybit"
 
-        bar_level = 10 if monster else (9 if super_hyper else (8 if hyper else level))
-        power_bar = self.signal_power_bar(bar_level)
-
+        links_ex = ex if level == 1 else 'BYBIT'
         return (
             f"<b>{top_line}</b>\n"
-            f"<b>{header}</b>\n"
-            f"{power_bar}\n\n"
+            f"<b>{header}</b>\n\n"
             f"Событие: {self.fmt_usd(trigger_usd)}\n"
             f"Поток 15м: {trigger_flow}{mapping_note}\n\n"
             f"{self.render_blocks(stats)}\n\n"
-            f"{self.compact_links(ex if level == 1 else 'BYBIT', symbol)}"
+            f"{self.compact_links(links_ex, symbol)}"
         )
 
     def maybe_queue_level(self, state_key, snapshot):
@@ -1443,9 +1452,10 @@ class Bot:
             self.reset_range(state_key)
 
         entry_threshold = float(self.cfg["signals"].get("liq_level_1_usd", 9000))
+        flow_entry_threshold = float(self.cfg["signals"].get("level_1_flow_usd", entry_threshold))
         mode_name = str(self.cfg.get("runtime", {}).get("signal_mode", "combat"))
-        min_event_usd = 500.0 if mode_name == "fast_test" else 9000.0
-        local_entry_hit = usd >= entry_threshold or local_sum1 >= entry_threshold
+        min_event_usd = 500.0 if mode_name == "fast_test" else (25000.0 if mode_name == "power_day" else 9000.0)
+        local_entry_hit = usd >= entry_threshold or local_sum1 >= flow_entry_threshold
 
         if usd < min_event_usd and not local_entry_hit and not st["range_active"]:
             return
@@ -1609,7 +1619,7 @@ class Bot:
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5.6.5_clean_state_engine", flush=True)
+        print("✅ BOT STARTED / V5.6.6_modes_visual", flush=True)
         await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
 
 
