@@ -133,6 +133,7 @@ class Bot:
         self.startup_telegram_sent = False
         self.market_events_30m = {"BINANCE": deque(), "BYBIT": deque()}
         self.signal_history = deque(maxlen=5000)
+        self.chat_history = deque(maxlen=10000)
         self.control_state = {"awaiting_key": None}
         self.limit_button_map = {
             "1️⃣ Уровень 1": "signals.liq_level_1_usd",
@@ -172,7 +173,7 @@ class Bot:
             "keyboard": [
                 [{"text": "🏆 BINANCE /30м"}, {"text": "🏆 BYBIT /30м"}],
                 [{"text": "📊 Лимиты"}, {"text": "📤 Сигналы 24ч"}],
-                [{"text": "⚙️ Режим"}],
+                [{"text": "🗂 Чат 24ч"}, {"text": "⚙️ Режим"}],
                 [{"text": "🔄 Reload"}, {"text": "❓ Help"}],
             ],
             "resize_keyboard": True,
@@ -637,6 +638,7 @@ class Bot:
             "/top30_binance — топ 10 ликвидаций Binance за 30 минут\n"
             "/top30_bybit — топ 10 ликвидаций Bybit за 30 минут\n"
             "/reload — перечитать config + runtime_overrides\n"
+            "/export_chat_24h — выгрузить историю чата за 24ч\n"
             "/set section.key value — изменить лимит\n"
             "Примеры:\n"
             "<code>/set signals.level_5_usd 80000</code>\n"
@@ -683,6 +685,16 @@ class Bot:
         for row in items:
             w.writerow({c: row.get(c, '') for c in cols})
         return sio.getvalue()
+
+    def export_chat_history_text(self):
+        now = time.time()
+        items = [row for row in list(self.chat_history) if now - row.get("ts", 0) <= 86400]
+        if not items:
+            return "История чата за 24ч\n\nПока пусто."
+        out = ["История чата за 24ч", ""]
+        for i, row in enumerate(items[-10000:], 1):
+            out.append(f"{i}. {row.get('time','')} | {row.get('dir','')} | {row.get('kind','')} | {row.get('text','')}")
+        return "\n".join(out)
 
     def apply_signal_mode(self, mode_name):
         self.cfg.setdefault("runtime", {})
@@ -773,6 +785,11 @@ class Bot:
             fname = f"signals_24h_{time.strftime('%Y%m%d_%H%M%S')}.txt"
             ok = await self.send_document_text(fname, payload, caption="<b>Сигналы за 24ч</b>")
             return ("✅ Файл с сигналами за 24ч отправлен." if ok else "❌ Не удалось отправить файл."), self.keyboard
+        if text in ("/export_chat_24h", "🗂 Чат 24ч"):
+            payload = self.export_chat_history_text()
+            fname = f"chat_24h_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+            ok = await self.send_document_text(fname, payload, caption="<b>История чата за 24ч</b>")
+            return ("✅ Файл с историей чата за 24ч отправлен." if ok else "❌ Не удалось отправить файл."), self.keyboard
         if text in ("⚙️ Режим", "/mode"):
             return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000", self.mode_menu
         if text == "🟢 Normal":
@@ -854,6 +871,13 @@ class Bot:
                     if expected_chat_id and chat_id != expected_chat_id:
                         continue
                     text = msg.get("text", "")
+                    self.chat_history.append({
+                        "ts": time.time(),
+                        "time": time.strftime("%H:%M:%S", time.localtime(time.time())),
+                        "dir": "IN",
+                        "kind": "command",
+                        "text": text[:1500],
+                    })
                     reply, markup = await self.handle_control_command(text)
                     if reply:
                         await self.send(reply, reply_markup=markup or self.keyboard)
@@ -876,6 +900,13 @@ class Bot:
                 body = await resp.text()
                 print("Telegram:", resp.status, body[:160], flush=True)
                 if resp.status == 200:
+                    self.chat_history.append({
+                        "ts": time.time(),
+                        "time": time.strftime("%H:%M:%S", time.localtime(time.time())),
+                        "dir": "OUT",
+                        "kind": "message",
+                        "text": re.sub(r"<[^>]+>", "", text)[:3000],
+                    })
                     self.health["telegram_ok"] = True
                     self.health["last_telegram_ok_ts"] = time.time()
                     self.health["signals_sent"] += 1
@@ -904,6 +935,13 @@ class Bot:
                 body = await resp.text()
                 print("Telegram document:", resp.status, body[:160], flush=True)
                 if resp.status == 200:
+                    self.chat_history.append({
+                        "ts": time.time(),
+                        "time": time.strftime("%H:%M:%S", time.localtime(time.time())),
+                        "dir": "OUT",
+                        "kind": "document",
+                        "text": f"{filename} | {caption or ''}"[:3000],
+                    })
                     self.health["telegram_ok"] = True
                     self.health["last_telegram_ok_ts"] = time.time()
                     self.write_health()
@@ -1041,24 +1079,34 @@ class Bot:
                 async with session.get(BINANCE_OI_NOW, params={"symbol": symbol}, timeout=20) as resp:
                     oi_now = await resp.json()
                 async with session.get(BINANCE_OI_HIST, params={"symbol": symbol, "period": "5m", "limit": 3}, timeout=20) as resp:
-                    oi_hist = await resp.json()
+                    oi_hist_5m = await resp.json()
+                async with session.get(BINANCE_OI_HIST, params={"symbol": symbol, "period": "4h", "limit": 2}, timeout=20) as resp:
+                    oi_hist_4h = await resp.json()
 
                 current_contracts = float(oi_now.get("openInterest", 0))
                 current_usd = None
                 pct_1m = None
                 pct_5m = None
+                pct_4h = None
 
-                if isinstance(oi_hist, list) and len(oi_hist) >= 1:
-                    current_usd = float(oi_hist[-1].get("sumOpenInterestValue", 0))
-                    if len(oi_hist) >= 2:
-                        prev_5m = float(oi_hist[-2].get("sumOpenInterestValue", 0))
+                if isinstance(oi_hist_5m, list) and len(oi_hist_5m) >= 1:
+                    current_usd = float(oi_hist_5m[-1].get("sumOpenInterestValue", 0))
+                    if len(oi_hist_5m) >= 2:
+                        prev_5m = float(oi_hist_5m[-2].get("sumOpenInterestValue", 0))
                         pct_5m = ((current_usd - prev_5m) / prev_5m) * 100 if prev_5m else None
-                    current_hist_contracts = float(oi_hist[-1].get("sumOpenInterest", 0))
+                    current_hist_contracts = float(oi_hist_5m[-1].get("sumOpenInterest", 0))
                     pct_1m = ((current_contracts - current_hist_contracts) / current_hist_contracts) * 100 if current_hist_contracts else None
 
-                result = {"now": current_usd, "pct_1m": pct_1m, "pct_5m": pct_5m}
+                if isinstance(oi_hist_4h, list) and len(oi_hist_4h) >= 2:
+                    cur_4h = float(oi_hist_4h[-1].get("sumOpenInterestValue", 0))
+                    prev_4h = float(oi_hist_4h[-2].get("sumOpenInterestValue", 0))
+                    pct_4h = ((cur_4h - prev_4h) / prev_4h) * 100 if prev_4h else None
+                    if current_usd is None:
+                        current_usd = cur_4h
+
+                result = {"now": current_usd, "pct_1m": pct_1m, "pct_5m": pct_5m, "pct_4h": pct_4h}
             except Exception:
-                result = {"now": None, "pct_1m": None, "pct_5m": None}
+                result = {"now": None, "pct_1m": None, "pct_5m": None, "pct_4h": None}
 
         self._cache_set(("oi", symbol), result)
         return result
@@ -1174,7 +1222,7 @@ class Bot:
             return
 
         checklist = (
-            "<b>🤖 Mighty Tiger / V5.6.6_modes_visual</b>\n<i>Ggrrr... Liquidity jungle hunter</i>\n\n"
+            "<b>🤖 Mighty Tiger / V5.6.7_chat_export_oi4h</b>\n<i>Ggrrr... Liquidity jungle hunter</i>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -1450,6 +1498,7 @@ class Bot:
         st = self.symbol_state[state_key]
         if self.should_reset_range(st, now):
             self.reset_range(state_key)
+        scenario_ex = st.get("range_exchange") or ex
 
         entry_threshold = float(self.cfg["signals"].get("liq_level_1_usd", 9000))
         flow_entry_threshold = float(self.cfg["signals"].get("level_1_flow_usd", entry_threshold))
@@ -1463,7 +1512,7 @@ class Bot:
         if self.update_monster(state_key, now, usd):
             snap = {
                 "now": now,
-                "ex": ex,
+                "ex": scenario_ex,
                 "trigger_usd": max(usd, entry_threshold),
                 "sum15": max(agg_sum15, usd),
                 "cnt": agg_cnt,
@@ -1531,7 +1580,7 @@ class Bot:
 
         snapshot = {
             "now": now,
-            "ex": ex,
+            "ex": scenario_ex,
             "trigger_usd": max(usd, entry_threshold),
             "sum15": agg_sum15,
             "cnt": agg_cnt,
@@ -1619,7 +1668,7 @@ class Bot:
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5.6.6_modes_visual", flush=True)
+        print("✅ BOT STARTED / V5.6.7_chat_export_oi4h", flush=True)
         await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
 
 
