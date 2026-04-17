@@ -125,6 +125,8 @@ class Bot:
             "last_sent_ts": 0.0,
             "last_lvl1_signature": "",
             "last_lvl1_ts": 0.0,
+            "last_state_signature": "",
+            "last_state_ts": 0.0,
         })
 
         self.binance_cache = {}
@@ -137,6 +139,7 @@ class Bot:
         self.market_events_30m = {"BINANCE": deque(), "BYBIT": deque()}
         self.signal_history = deque(maxlen=5000)
         self.chat_history = deque(maxlen=10000)
+        self.state_locks = {}
         self.control_state = {"awaiting_key": None}
         self.limit_button_map = {
             "1️⃣ Уровень 1": "signals.liq_level_1_usd",
@@ -449,6 +452,20 @@ class Bot:
         badges = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
         lvl = max(1, min(10, int(level)))
         return "".join(badges[i] if i < lvl else "⬜️" for i in range(10))
+
+    
+    def build_state_signature(self, symbol, ex, level, sum15, cnt):
+        flow_bucket = int(float(sum15) // 500)
+        cnt_bucket = int(int(cnt) // 5)
+        return f"{symbol}|{ex}|L{int(level)}|F{flow_bucket}|C{cnt_bucket}"
+
+    def should_skip_state_signal(self, st, state_sig, level, now):
+        cooldown = 30 if int(level) == 1 else 15
+        return state_sig == st.get("last_state_signature", "") and now - st.get("last_state_ts", 0.0) < cooldown
+
+    def mark_state_signal_sent(self, st, state_sig, now):
+        st["last_state_signature"] = state_sig
+        st["last_state_ts"] = now
 
     def compute_level(self, trigger_usd, sum15, _unused1=0, _unused2=0):
         flow_lvl1 = float(self.cfg["signals"].get("level_1_flow_usd", self.cfg["signals"].get("liq_level_1_usd", 9000)))
@@ -1248,7 +1265,7 @@ class Bot:
             return
 
         checklist = (
-            "<b>🤖 Mighty Tiger / V5.6.7_baseline_stage1</b>\n<i>Ggrrr... Liquidity jungle hunter</i>\n\n"
+            "<b>🤖 Mighty Tiger / V5.7_state_engine</b>\n<i>Ggrrr... Liquidity jungle hunter</i>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -1709,7 +1726,7 @@ class Bot:
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5.6.7_baseline_stage1", flush=True)
+        print("✅ BOT STARTED / V5.7_state_engine", flush=True)
         await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
 
 
