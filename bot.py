@@ -7,6 +7,7 @@ import html
 import csv
 import io
 import json
+import re
 import os
 import signal
 import sys
@@ -122,10 +123,6 @@ class Bot:
             "monster_active": False,
             "last_sent_signature": "",
             "last_sent_ts": 0.0,
-            "sending_signature": "",
-            "sending_until": 0.0,
-            "last_lvl1_signature": "",
-            "last_lvl1_ts": 0.0,
         })
 
         self.binance_cache = {}
@@ -137,7 +134,6 @@ class Bot:
         self.startup_telegram_sent = False
         self.market_events_30m = {"BINANCE": deque(), "BYBIT": deque()}
         self.signal_history = deque(maxlen=5000)
-        self.chat_history = deque(maxlen=10000)
         self.control_state = {"awaiting_key": None}
         self.limit_button_map = {
             "1️⃣ Уровень 1": "signals.liq_level_1_usd",
@@ -175,25 +171,10 @@ class Bot:
         }
         self.keyboard = {
             "keyboard": [
-                [{"text": "🏆 TOP"}, {"text": "📥 Скачать"}],
-                [{"text": "📊 Лимиты"}, {"text": "⚙️ Режим"}],
-                [{"text": "🔄 Reload"}, {"text": "❓ Help"}],
-            ],
-            "resize_keyboard": True,
-            "is_persistent": True,
-        }
-        self.top_menu = {
-            "keyboard": [
                 [{"text": "🏆 BINANCE /30м"}, {"text": "🏆 BYBIT /30м"}],
-                [{"text": "↩️ Назад"}],
-            ],
-            "resize_keyboard": True,
-            "is_persistent": True,
-        }
-        self.download_menu = {
-            "keyboard": [
-                [{"text": "📤 Сигналы 24ч"}, {"text": "🗂 Чат 24ч"}],
-                [{"text": "↩️ Назад"}],
+                [{"text": "📊 Лимиты"}, {"text": "📤 Сигналы 24ч"}],
+                [{"text": "⚙️ Режим"}],
+                [{"text": "🔄 Reload"}, {"text": "❓ Help"}],
             ],
             "resize_keyboard": True,
             "is_persistent": True,
@@ -451,51 +432,8 @@ class Bot:
         lvl = max(1, min(10, int(level)))
         return "".join(badges[i] if i < lvl else "⬜️" for i in range(10))
 
-
-    def can_send_signature(self, st, signature, now, ttl=20):
-        if st.get("sending_signature") == signature and now < st.get("sending_until", 0.0):
-            return False
-        st["sending_signature"] = signature
-        st["sending_until"] = now + ttl
-        return True
-
-    def finish_send_signature(self, st, signature):
-        if st.get("sending_signature") == signature:
-            st["sending_signature"] = ""
-            st["sending_until"] = 0.0
-
-    def append_signal_history_row(self, now, symbol, snap, stats, message_id=""):
-        tf = stats.get("tf", {})
-        oi = stats.get("oi", {})
-        ratio = stats.get("ratio", {})
-        by_sym, _mode = self.resolve_bybit_symbol(symbol)
-        row = {
-            "ts": now,
-            "time": time.strftime("%H:%M:%S", time.localtime(now)),
-            "symbol": symbol,
-            "exchange": snap["ex"],
-            "label": ("MONSTER" if snap.get("monster") else ("LVL9" if snap.get("super_hyper") else f"LVL{snap['level']}")),
-            "event": self.fmt_usd(snap["trigger_usd"]),
-            "flow": self.fmt_usd(snap["sum15"]),
-            "cnt": snap["cnt"],
-            "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
-            "mapped": by_sym or "BY n/a",
-            "message_id": message_id or "",
-            "rank": stats.get("rank", ""),
-            "price_1h": self.fmt_pct(tf.get("1ч", {}).get("price_pct")),
-            "price_4h": self.fmt_pct(tf.get("4ч", {}).get("price_pct")),
-            "price_24h": self.fmt_pct(tf.get("24ч", {}).get("price_pct")),
-            "oi_now": self.fmt_usd(oi.get("now")),
-            "oi_5m": self.fmt_pct(oi.get("pct_5m")),
-            "oi_4h": self.fmt_pct(oi.get("pct_4h")),
-            "long_pct": self.fmt_pct(ratio.get("long")),
-            "short_pct": self.fmt_pct(ratio.get("short")),
-            "funding": self.fmt_pct(stats.get("funding")),
-        }
-        self.signal_history.append(row)
-        return row
-
     def compute_level(self, trigger_usd, sum15, _unused1=0, _unused2=0):
+        flow_lvl1 = float(self.cfg["signals"].get("level_1_flow_usd", self.cfg["signals"].get("liq_level_1_usd", 9000)))
         if sum15 >= float(self.cfg["signals"].get("level_7_usd", 150000)):
             return 7
         if sum15 >= float(self.cfg["signals"].get("level_6_usd", 120000)):
@@ -508,7 +446,7 @@ class Bot:
             return 3
         if sum15 >= float(self.cfg["signals"].get("level_2_usd", 15000)):
             return 2
-        if trigger_usd >= float(self.cfg["signals"].get("liq_level_1_usd", 9000)):
+        if trigger_usd >= float(self.cfg["signals"].get("liq_level_1_usd", 9000)) or sum15 >= flow_lvl1:
             return 1
         return 0
 
@@ -549,10 +487,6 @@ class Bot:
         st["monster_active"] = False
         st["last_sent_signature"] = ""
         st["last_sent_ts"] = 0.0
-        st["sending_signature"] = ""
-        st["sending_until"] = 0.0
-        st["last_lvl1_signature"] = ""
-        st["last_lvl1_ts"] = 0.0
 
     def open_range(self, state_key, ex, now):
         st = self.symbol_state[state_key]
@@ -570,10 +504,6 @@ class Bot:
         st["monster_active"] = False
         st["last_sent_signature"] = ""
         st["last_sent_ts"] = 0.0
-        st["sending_signature"] = ""
-        st["sending_until"] = 0.0
-        st["last_lvl1_signature"] = ""
-        st["last_lvl1_ts"] = 0.0
 
     def events_word(self, n):
         n = int(n)
@@ -632,12 +562,13 @@ class Bot:
         ex = ",".join(s.get("allowed_exchanges", ["BINANCE", "BYBIT"]))
         mode = str(self.cfg.get("runtime", {}).get("signal_mode", "combat"))
         mode_text = "Fast test" if mode == "fast_test" else ("Power day" if mode == "power_day" else "Normal")
-        min_event_effective = 500 if mode == "fast_test" else (25000 if mode == "power_day" else 9000)
-        flow_level_1 = int(s.get("level_1_flow_usd", s.get("liq_level_1_usd", 9000)))
+        liq1 = int(s.get("liq_level_1_usd", 9000))
+        flow1 = int(s.get("level_1_flow_usd", liq1))
+        min_event_effective = int(f.get("min_event_usd", liq1))
         return (
             "<b>Текущие лимиты</b>\n\n"
             f"Режим: {mode_text}\n"
-            f"Ликвидация 1: {int(s.get('liq_level_1_usd', 9000))} или поток {flow_level_1}\n"
+            f"Ликвидация 1: {liq1} или поток {flow1}\n"
             f"Уровень 2: {int(s.get('level_2_usd', 15000))}\n"
             f"Уровень 3: {int(s.get('level_3_usd', 30000))}\n"
             f"Уровень 4: {int(s.get('level_4_usd', 50000))}\n"
@@ -654,7 +585,7 @@ class Bot:
             f"Reset диапазона: {int(s.get('range_reset_sec', 900)) // 60} мин\n"
             f"Биржи сигналов: {ex}\n"
             f"Терминал: {int(f.get('min_terminal_usd', 10000))}\n"
-            f"Мин. событие: {int(min_event_effective)}\n"
+            f"Мин. событие: {min_event_effective}\n"
             f"Top 10 минимум: {int(f.get('top30_min_usd', 3000))}"
         )
 
@@ -709,7 +640,6 @@ class Bot:
             "/top30_binance — топ 10 ликвидаций Binance за 30 минут\n"
             "/top30_bybit — топ 10 ликвидаций Bybit за 30 минут\n"
             "/reload — перечитать config + runtime_overrides\n"
-            "/export_chat_24h — выгрузить историю чата за 24ч\n"
             "/set section.key value — изменить лимит\n"
             "Примеры:\n"
             "<code>/set signals.level_5_usd 80000</code>\n"
@@ -756,16 +686,6 @@ class Bot:
         for row in items:
             w.writerow({c: row.get(c, '') for c in cols})
         return sio.getvalue()
-
-    def export_chat_history_text(self):
-        now = time.time()
-        items = [row for row in list(self.chat_history) if now - row.get("ts", 0) <= 86400]
-        if not items:
-            return "История чата за 24ч\n\nПока пусто."
-        out = ["История чата за 24ч", ""]
-        for i, row in enumerate(items[-10000:], 1):
-            out.append(f"{i}. {row.get('time','')} | {row.get('dir','')} | {row.get('kind','')} | {row.get('text','')}")
-        return "\n".join(out)
 
     def apply_signal_mode(self, mode_name):
         self.cfg.setdefault("runtime", {})
@@ -851,20 +771,11 @@ class Bot:
             except Exception as e:
                 return f"❌ Ошибка: {e}\nПовтори ввод или нажми ↩️ Назад", self.limit_menu
 
-        if text in ("🏆 TOP", "/top"):
-            return "<b>TOP</b>\n\nВыбери биржу.", self.top_menu
-        if text in ("📥 Скачать", "/download"):
-            return "<b>Скачать</b>\n\nВыбери тип выгрузки.", self.download_menu
         if text in ("/export_24h", "📤 Сигналы 24ч"):
             payload = self.export_signals_text()
             fname = f"signals_24h_{time.strftime('%Y%m%d_%H%M%S')}.txt"
             ok = await self.send_document_text(fname, payload, caption="<b>Сигналы за 24ч</b>")
-            return ("✅ Файл с сигналами за 24ч отправлен." if ok else "❌ Не удалось отправить файл."), self.download_menu
-        if text in ("/export_chat_24h", "🗂 Чат 24ч"):
-            payload = self.export_chat_history_text()
-            fname = f"chat_24h_{time.strftime('%Y%m%d_%H%M%S')}.txt"
-            ok = await self.send_document_text(fname, payload, caption="<b>История чата за 24ч</b>")
-            return ("✅ Файл с историей чата за 24ч отправлен." if ok else "❌ Не удалось отправить файл."), self.download_menu
+            return ("✅ Файл с сигналами за 24ч отправлен." if ok else "❌ Не удалось отправить файл."), self.keyboard
         if text in ("⚙️ Режим", "/mode"):
             return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000", self.mode_menu
         if text == "🟢 Normal":
@@ -877,9 +788,9 @@ class Bot:
         if text in ("/limits", "📊 Лимиты"):
             return self.format_limits(), self.limit_menu
         if text in ("/top30_binance", "/top15_binance", "🏆 BINANCE /30м", "🏆 BINANCE /15м"):
-            return self.format_top30("BINANCE"), self.top_menu
+            return self.format_top30("BINANCE"), self.keyboard
         if text in ("/top30_bybit", "/top15_bybit", "🏆 BYBIT /30м", "🏆 BYBIT /15м"):
-            return self.format_top30("BYBIT"), self.top_menu
+            return self.format_top30("BYBIT"), self.keyboard
         if text in ("/reload", "🔄 Reload"):
             self.cfg = load()
             return "✅ Конфиг и overrides перечитаны.", self.keyboard
@@ -946,13 +857,6 @@ class Bot:
                     if expected_chat_id and chat_id != expected_chat_id:
                         continue
                     text = msg.get("text", "")
-                    self.chat_history.append({
-                        "ts": time.time(),
-                        "time": time.strftime("%H:%M:%S", time.localtime(time.time())),
-                        "dir": "IN",
-                        "kind": "command",
-                        "text": text[:1500],
-                    })
                     reply, markup = await self.handle_control_command(text)
                     if reply:
                         await self.send(reply, reply_markup=markup or self.keyboard)
@@ -975,13 +879,6 @@ class Bot:
                 body = await resp.text()
                 print("Telegram:", resp.status, body[:160], flush=True)
                 if resp.status == 200:
-                    self.chat_history.append({
-                        "ts": time.time(),
-                        "time": time.strftime("%H:%M:%S", time.localtime(time.time())),
-                        "dir": "OUT",
-                        "kind": "message",
-                        "text": re.sub(r"<[^>]+>", "", text)[:3000],
-                    })
                     self.health["telegram_ok"] = True
                     self.health["last_telegram_ok_ts"] = time.time()
                     self.health["signals_sent"] += 1
@@ -1010,13 +907,6 @@ class Bot:
                 body = await resp.text()
                 print("Telegram document:", resp.status, body[:160], flush=True)
                 if resp.status == 200:
-                    self.chat_history.append({
-                        "ts": time.time(),
-                        "time": time.strftime("%H:%M:%S", time.localtime(time.time())),
-                        "dir": "OUT",
-                        "kind": "document",
-                        "text": f"{filename} | {caption or ''}"[:3000],
-                    })
                     self.health["telegram_ok"] = True
                     self.health["last_telegram_ok_ts"] = time.time()
                     self.write_health()
@@ -1154,34 +1044,24 @@ class Bot:
                 async with session.get(BINANCE_OI_NOW, params={"symbol": symbol}, timeout=20) as resp:
                     oi_now = await resp.json()
                 async with session.get(BINANCE_OI_HIST, params={"symbol": symbol, "period": "5m", "limit": 3}, timeout=20) as resp:
-                    oi_hist_5m = await resp.json()
-                async with session.get(BINANCE_OI_HIST, params={"symbol": symbol, "period": "4h", "limit": 2}, timeout=20) as resp:
-                    oi_hist_4h = await resp.json()
+                    oi_hist = await resp.json()
 
                 current_contracts = float(oi_now.get("openInterest", 0))
                 current_usd = None
                 pct_1m = None
                 pct_5m = None
-                pct_4h = None
 
-                if isinstance(oi_hist_5m, list) and len(oi_hist_5m) >= 1:
-                    current_usd = float(oi_hist_5m[-1].get("sumOpenInterestValue", 0))
-                    if len(oi_hist_5m) >= 2:
-                        prev_5m = float(oi_hist_5m[-2].get("sumOpenInterestValue", 0))
+                if isinstance(oi_hist, list) and len(oi_hist) >= 1:
+                    current_usd = float(oi_hist[-1].get("sumOpenInterestValue", 0))
+                    if len(oi_hist) >= 2:
+                        prev_5m = float(oi_hist[-2].get("sumOpenInterestValue", 0))
                         pct_5m = ((current_usd - prev_5m) / prev_5m) * 100 if prev_5m else None
-                    current_hist_contracts = float(oi_hist_5m[-1].get("sumOpenInterest", 0))
+                    current_hist_contracts = float(oi_hist[-1].get("sumOpenInterest", 0))
                     pct_1m = ((current_contracts - current_hist_contracts) / current_hist_contracts) * 100 if current_hist_contracts else None
 
-                if isinstance(oi_hist_4h, list) and len(oi_hist_4h) >= 2:
-                    cur_4h = float(oi_hist_4h[-1].get("sumOpenInterestValue", 0))
-                    prev_4h = float(oi_hist_4h[-2].get("sumOpenInterestValue", 0))
-                    pct_4h = ((cur_4h - prev_4h) / prev_4h) * 100 if prev_4h else None
-                    if current_usd is None:
-                        current_usd = cur_4h
-
-                result = {"now": current_usd, "pct_1m": pct_1m, "pct_5m": pct_5m, "pct_4h": pct_4h}
+                result = {"now": current_usd, "pct_1m": pct_1m, "pct_5m": pct_5m}
             except Exception:
-                result = {"now": None, "pct_1m": None, "pct_5m": None, "pct_4h": None}
+                result = {"now": None, "pct_1m": None, "pct_5m": None}
 
         self._cache_set(("oi", symbol), result)
         return result
@@ -1245,7 +1125,7 @@ class Bot:
             parts.append(f"10м Уровень {lvl10}")
         return " / ".join(parts) if parts else "нет"
 
-    def render_blocks(self, stats):
+    def render_blocks(self, stats, compact_oi=False):
         rank = stats.get("rank")
         rank_text = f"#{rank}" if rank else ">250 / н/д"
 
@@ -1281,7 +1161,8 @@ class Bot:
             f"1ч: {px1_marks} {self.fmt_pct(r1.get('price_pct'))}\n"
             f"4ч: {px4_marks} {self.fmt_pct(r4.get('price_pct'))}\n"
             f"24ч: {px24_marks} {self.fmt_pct(r24.get('price_pct'))}\n\n"
-            f"<b>📊 Открытый интерес:</b> сейчас: {self.fmt_usd(oi.get('now'))}\n"
+            f"<b>📊 Открытый интерес:</b>\n"
+            f"сейчас: {self.fmt_usd(oi.get('now'))}\n"
             f"5м: {oi5_marks} {self.fmt_pct(oi.get('pct_5m'))}\n"
             f"4ч: {oi4h_marks} {self.fmt_pct(oi.get('pct_4h'))}\n\n"
             f"<b>👥 Аккаунты:</b>\n"
@@ -1297,7 +1178,7 @@ class Bot:
             return
 
         checklist = (
-            "<b>🤖 Mighty Tiger / V5.6.8_dedupe_menu_fix</b>\n<i>Ggrrr... Liquidity jungle hunter</i>\n\n"
+            "<b>🤖 Mighty Tiger / V5.6.6.1_re_hotfix</b>\n<i>Ggrrr... Liquidity jungle hunter</i>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -1360,14 +1241,13 @@ class Bot:
         elif mode == "na":
             mapping_note = "\n⚠️ Нет точного тикера на Bybit"
 
-        links_ex = ex if level == 1 else 'BYBIT'
         return (
             f"<b>{top_line}</b>\n"
             f"<b>{header}</b>\n\n"
             f"Событие: {self.fmt_usd(trigger_usd)}\n"
             f"Поток 15м: {trigger_flow}{mapping_note}\n\n"
-            f"{self.render_blocks(stats)}\n\n"
-            f"{self.compact_links(links_ex, symbol)}"
+            f"{self.render_blocks(stats, compact_oi=True)}\n\n"
+            f"{self.compact_links(ex if level == 1 else 'BYBIT', symbol)}"
         )
 
     def maybe_queue_level(self, state_key, snapshot):
@@ -1382,7 +1262,6 @@ class Bot:
             st["pending_since_ts"] = snapshot["now"]
             st["pending_snapshot"] = snapshot
 
-
     async def maybe_send_pending(self, symbol, state_key):
         st = self.symbol_state[state_key]
         if st["pending_level"] <= max(st["last_sent_level"], st.get("max_level_sent", 0)) or not st["pending_snapshot"]:
@@ -1394,46 +1273,46 @@ class Bot:
             return
 
         snap = st["pending_snapshot"]
-        signature = f"{symbol}|{snap['ex']}|{snap['level']}|{round(float(snap['sum15']),1)}"
-
-        if snap["level"] == 1 and signature == st.get("last_lvl1_signature", "") and now - st.get("last_lvl1_ts", 0.0) < 900:
+        signature = f"{symbol}|{snap['level']}|{round(float(snap['sum15']),1)}"
+        if signature == st.get("last_sent_signature", "") and now - st.get("last_sent_ts", 0.0) < 120:
             st["pending_level"] = 0
             st["pending_since_ts"] = 0.0
             st["pending_snapshot"] = None
-            return
-
-        if signature == st.get("last_sent_signature", "") and now - st.get("last_sent_ts", 0.0) < 180:
-            st["pending_level"] = 0
-            st["pending_since_ts"] = 0.0
-            st["pending_snapshot"] = None
-            return
-
-        if not self.can_send_signature(st, signature, now, ttl=20):
             return
 
         stats = await self.get_symbol_stats(symbol)
-
-        st["pending_level"] = 0
-        st["pending_since_ts"] = 0.0
-        st["pending_snapshot"] = None
-
-        row = self.append_signal_history_row(now, symbol, snap, stats, message_id="")
         print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
-        try:
-            message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
-            row["message_id"] = message_id or ""
-        finally:
-            self.finish_send_signature(st, signature)
-
-        st["last_sent_level"] = snap["level"]
+        message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
+        tf = stats.get("tf", {})
+        oi = stats.get("oi", {})
+        ratio = stats.get("ratio", {})
+        by_sym, _mode = self.resolve_bybit_symbol(symbol)
+        self.signal_history.append({
+            "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
+            "symbol": symbol, "exchange": snap["ex"], "label": f"LVL{snap['level']}",
+            "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"],
+            "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
+            "mapped": by_sym or "BY n/a",
+            "message_id": message_id or "",
+            "rank": stats.get("rank",""),
+            "price_1h": self.fmt_pct(tf.get("1ч", {}).get("price_pct")),
+            "price_4h": self.fmt_pct(tf.get("4ч", {}).get("price_pct")),
+            "price_24h": self.fmt_pct(tf.get("24ч", {}).get("price_pct")),
+            "oi_now": self.fmt_usd(oi.get("now")),
+            "oi_5m": self.fmt_pct(oi.get("pct_5m")),
+            "oi_4h": self.fmt_pct(oi.get("pct_4h")),
+            "long_pct": self.fmt_pct(ratio.get("long")),
+            "short_pct": self.fmt_pct(ratio.get("short")),
+            "funding": self.fmt_pct(stats.get("funding")),
+        })
+        st["last_sent_level"] = st["pending_level"]
         st["max_level_sent"] = max(st.get("max_level_sent", 0), st["last_sent_level"])
         st["last_level_change_ts"] = now
         st["last_sent_signature"] = signature
         st["last_sent_ts"] = now
-        if snap["level"] == 1:
-            st["last_lvl1_signature"] = signature
-            st["last_lvl1_ts"] = now
-
+        st["pending_level"] = 0
+        st["pending_since_ts"] = 0.0
+        st["pending_snapshot"] = None
 
     async def maybe_send_hyper(self, symbol, state_key, snapshot):
         st = self.symbol_state[state_key]
@@ -1443,6 +1322,7 @@ class Bot:
         lvl8_cooldown = int(self.cfg["signals"].get("hyper_cooldown_sec", 300))
         lvl9_cooldown = int(self.cfg["signals"].get("super_hyper_cooldown_sec", 3600))
 
+        # release active states if flow cooled off
         if snapshot["sum15"] < lvl8_usd * 0.85:
             st["lvl8_active"] = False
         if snapshot["sum15"] < lvl9_usd * 0.85:
@@ -1463,23 +1343,37 @@ class Bot:
             if now < st["hyper_cooldown_until"]:
                 return
 
-        signature = f"{symbol}|{snapshot['ex']}|{9 if is_lvl9 else 8}|{round(float(snapshot['sum15']),1)}"
-        if signature == st.get("last_sent_signature", "") and now - st.get("last_sent_ts", 0.0) < 180:
-            return
-        if not self.can_send_signature(st, signature, now, ttl=20):
+        signature = f"{symbol}|{9 if is_lvl9 else 8}|{round(float(snapshot['sum15']),1)}"
+        if signature == st.get("last_sent_signature", "") and now - st.get("last_sent_ts", 0.0) < 120:
             return
 
         stats = await self.get_symbol_stats(symbol)
         snap = dict(snapshot)
         snap["super_hyper"] = is_lvl9
-
-        row = self.append_signal_history_row(now, symbol, snap, stats, message_id="")
         print(self.trigger_log_line(symbol, snap, hyper=not is_lvl9), flush=True)
-        try:
-            message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=not is_lvl9))
-            row["message_id"] = message_id or ""
-        finally:
-            self.finish_send_signature(st, signature)
+        message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=not is_lvl9))
+        tf = stats.get("tf", {})
+        oi = stats.get("oi", {})
+        ratio = stats.get("ratio", {})
+        by_sym, _mode = self.resolve_bybit_symbol(symbol)
+        self.signal_history.append({
+            "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
+            "symbol": symbol, "exchange": snap["ex"], "label": ("LVL9" if is_lvl9 else "LVL8"),
+            "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"],
+            "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
+            "mapped": by_sym or "BY n/a",
+            "message_id": message_id or "",
+            "rank": stats.get("rank",""),
+            "price_1h": self.fmt_pct(tf.get("1ч", {}).get("price_pct")),
+            "price_4h": self.fmt_pct(tf.get("4ч", {}).get("price_pct")),
+            "price_24h": self.fmt_pct(tf.get("24ч", {}).get("price_pct")),
+            "oi_now": self.fmt_usd(oi.get("now")),
+            "oi_5m": self.fmt_pct(oi.get("pct_5m")),
+            "oi_4h": self.fmt_pct(oi.get("pct_4h")),
+            "long_pct": self.fmt_pct(ratio.get("long")),
+            "short_pct": self.fmt_pct(ratio.get("short")),
+            "funding": self.fmt_pct(stats.get("funding")),
+        })
 
         if is_lvl9:
             st["lvl9_active"] = True
@@ -1497,6 +1391,31 @@ class Bot:
         st["pending_level"] = 0
         st["pending_since_ts"] = 0.0
         st["pending_snapshot"] = None
+
+    def update_monster(self, state_key, now, usd):
+        dq = self.events_3h[state_key]
+        dq.append((now, usd))
+        while dq and now - dq[0][0] > 18000:
+            dq.popleft()
+        total = sum(v for _, v in dq)
+        st = self.symbol_state[state_key]
+        thr = float(self.cfg["signals"].get("monster_3h_usd", 500000))
+
+        if total < thr * 0.85:
+            st["monster_active"] = False
+
+        if total < thr:
+            return False
+
+        if st.get("monster_active", False):
+            return False
+
+        if now < st["monster_mute_until"]:
+            return False
+
+        st["monster_active"] = True
+        st["monster_mute_until"] = now + int(self.cfg["signals"].get("monster_mute_sec", 10800))
+        return True
 
     async def handle(self, ex, symbol, side, usd):
         if self.is_blacklisted(symbol):
@@ -1534,46 +1453,56 @@ class Bot:
         st = self.symbol_state[state_key]
         if self.should_reset_range(st, now):
             self.reset_range(state_key)
-        scenario_ex = st.get("range_exchange") or ex
 
         entry_threshold = float(self.cfg["signals"].get("liq_level_1_usd", 9000))
         flow_entry_threshold = float(self.cfg["signals"].get("level_1_flow_usd", entry_threshold))
-        mode_name = str(self.cfg.get("runtime", {}).get("signal_mode", "combat"))
-        min_event_usd = 500.0 if mode_name == "fast_test" else (25000.0 if mode_name == "power_day" else 9000.0)
+        min_event_usd = float(self.cfg.get("filters", {}).get("min_event_usd", entry_threshold))
         local_entry_hit = usd >= entry_threshold or local_sum1 >= flow_entry_threshold
 
         if usd < min_event_usd and not local_entry_hit and not st["range_active"]:
             return
 
-
         if self.update_monster(state_key, now, usd):
             snap = {
                 "now": now,
-                "ex": scenario_ex,
+                "ex": ex,
                 "trigger_usd": max(usd, entry_threshold),
                 "sum15": max(agg_sum15, usd),
                 "cnt": agg_cnt,
                 "level": 10,
                 "monster": True,
             }
-            signature = f"{symbol}|{snap['ex']}|10|{round(float(snap['sum15']),1)}"
-            if not self.can_send_signature(st, signature, now, ttl=20):
-                return
             stats = await self.get_symbol_stats(symbol)
-            row = self.append_signal_history_row(now, symbol, snap, stats, message_id="")
             print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
-            try:
-                message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
-                row["message_id"] = message_id or ""
-            finally:
-                self.finish_send_signature(st, signature)
+            message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
+            tf = stats.get("tf", {})
+            oi = stats.get("oi", {})
+            ratio = stats.get("ratio", {})
+            by_sym, _mode = self.resolve_bybit_symbol(symbol)
+            self.signal_history.append({
+                "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
+                "symbol": symbol, "exchange": snap["ex"], "label": "MONSTER",
+                "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"],
+                "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
+                "mapped": by_sym or "BY n/a",
+                "message_id": message_id or "",
+                "rank": stats.get("rank",""),
+                "price_1h": self.fmt_pct(tf.get("1ч", {}).get("price_pct")),
+                "price_4h": self.fmt_pct(tf.get("4ч", {}).get("price_pct")),
+                "price_24h": self.fmt_pct(tf.get("24ч", {}).get("price_pct")),
+                "oi_now": self.fmt_usd(oi.get("now")),
+                "oi_5m": self.fmt_pct(oi.get("pct_5m")),
+                "oi_4h": self.fmt_pct(oi.get("pct_4h")),
+                "long_pct": self.fmt_pct(ratio.get("long")),
+                "short_pct": self.fmt_pct(ratio.get("short")),
+                "funding": self.fmt_pct(stats.get("funding")),
+            })
             st["last_sent_level"] = 10
             st["max_level_sent"] = 10
             st["last_level_change_ts"] = now
-            st["last_sent_signature"] = signature
+            st["last_sent_signature"] = f"{symbol}|10|{round(float(snap['sum15']),1)}"
             st["last_sent_ts"] = now
             return
-
 
         if not st["range_active"]:
             if not local_entry_hit:
@@ -1604,7 +1533,7 @@ class Bot:
 
         snapshot = {
             "now": now,
-            "ex": scenario_ex,
+            "ex": ex,
             "trigger_usd": max(usd, entry_threshold),
             "sum15": agg_sum15,
             "cnt": agg_cnt,
@@ -1692,7 +1621,7 @@ class Bot:
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5.6.8_dedupe_menu_fix", flush=True)
+        print("✅ BOT STARTED / V5.6.6.1_re_hotfix", flush=True)
         await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
 
 
