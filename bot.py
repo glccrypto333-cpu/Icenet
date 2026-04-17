@@ -522,6 +522,10 @@ class Bot:
         st["monster_active"] = False
         st["last_sent_signature"] = ""
         st["last_sent_ts"] = 0.0
+        st["last_lvl1_signature"] = ""
+        st["last_lvl1_ts"] = 0.0
+        st["last_state_signature"] = ""
+        st["last_state_ts"] = 0.0
 
     def open_range(self, state_key, ex, now):
         st = self.symbol_state[state_key]
@@ -539,6 +543,10 @@ class Bot:
         st["monster_active"] = False
         st["last_sent_signature"] = ""
         st["last_sent_ts"] = 0.0
+        st["last_lvl1_signature"] = ""
+        st["last_lvl1_ts"] = 0.0
+        st["last_state_signature"] = ""
+        st["last_state_ts"] = 0.0
 
     def events_word(self, n):
         n = int(n)
@@ -1265,7 +1273,7 @@ class Bot:
             return
 
         checklist = (
-            "<b>🤖 Mighty Tiger / V5.7_state_engine</b>\n<i>Ggrrr... Liquidity jungle hunter</i>\n\n"
+            "<b>🤖 Mighty Tiger / V5.7.1_state_flush</b>\n<i>Ggrrr... Liquidity jungle hunter</i>\n\n"
             "✅ Telegram OK\n"
             "✅ Binance connected\n"
             "✅ Bybit symbols loaded\n"
@@ -1361,12 +1369,19 @@ class Bot:
 
         snap = st["pending_snapshot"]
         signature = f"{symbol}|{snap['ex']}|{snap['level']}|{round(float(snap['sum15']),1)}"
-        if snap["level"] == 1 and signature == st.get("last_lvl1_signature", "") and now - st.get("last_lvl1_ts", 0.0) < 900:
+        state_sig = self.build_state_signature(symbol, snap["ex"], snap["level"], snap["sum15"], snap["cnt"])
+
+        if snap["level"] == 1 and signature == st.get("last_lvl1_signature", "") and now - st.get("last_lvl1_ts", 0.0) < 30:
             st["pending_level"] = 0
             st["pending_since_ts"] = 0.0
             st["pending_snapshot"] = None
             return
         if signature == st.get("last_sent_signature", "") and now - st.get("last_sent_ts", 0.0) < 180:
+            st["pending_level"] = 0
+            st["pending_since_ts"] = 0.0
+            st["pending_snapshot"] = None
+            return
+        if self.should_skip_state_signal(st, state_sig, snap["level"], now):
             st["pending_level"] = 0
             st["pending_since_ts"] = 0.0
             st["pending_snapshot"] = None
@@ -1406,6 +1421,7 @@ class Bot:
         st["last_level_change_ts"] = now
         st["last_sent_signature"] = signature
         st["last_sent_ts"] = now
+        self.mark_state_signal_sent(st, state_sig, now)
         if snap["level"] == 1:
             st["last_lvl1_signature"] = signature
             st["last_lvl1_ts"] = now
@@ -1493,6 +1509,23 @@ class Bot:
         st["pending_since_ts"] = 0.0
         st["pending_snapshot"] = None
 
+
+    async def pending_flush_loop(self):
+        while not self.stop_event.is_set():
+            try:
+                for state_key, st in list(self.symbol_state.items()):
+                    if not st.get("range_active"):
+                        continue
+                    if not st.get("pending_snapshot"):
+                        continue
+                    symbol = state_key[1]
+                    lock = self.state_locks.setdefault(state_key, asyncio.Lock())
+                    async with lock:
+                        await self.maybe_send_pending(symbol, state_key)
+            except Exception as e:
+                print(f"Pending flush error: {e!r}", flush=True)
+            await asyncio.sleep(1.0)
+
     def update_monster(self, state_key, now, usd):
         dq = self.events_3h[state_key]
         dq.append((now, usd))
@@ -1534,123 +1567,125 @@ class Bot:
         local_key = ("FLOW_LOCAL", ex, symbol, side)
         agg15_key = ("FLOW_AGG15", symbol, side)
         state_key = ("STATE", symbol)
+        lock = self.state_locks.setdefault(state_key, asyncio.Lock())
 
-        self.events_1m[local_key].append((now, usd))
-        self.events_15m[agg15_key].append((now, usd))
+        async with lock:
+            self.events_1m[local_key].append((now, usd))
+            self.events_15m[agg15_key].append((now, usd))
 
-        self.prune(self.events_1m[local_key], 60, now)
-        self.prune(self.events_15m[agg15_key], 900, now)
+            self.prune(self.events_1m[local_key], 60, now)
+            self.prune(self.events_15m[agg15_key], 900, now)
 
-        local_sum1 = sum(v for _, v in self.events_1m[local_key])
-        agg_sum15 = sum(v for _, v in self.events_15m[agg15_key])
-        agg_cnt = len(self.events_15m[agg15_key])
+            local_sum1 = sum(v for _, v in self.events_1m[local_key])
+            agg_sum15 = sum(v for _, v in self.events_15m[agg15_key])
+            agg_cnt = len(self.events_15m[agg15_key])
 
-        if side != "short":
-            return
-
-        if usd >= float(self.cfg["filters"]["min_terminal_usd"]):
-            print(f"{ex:<7} {symbol:<18} SHORT {self.fmt_usd(usd)} | local1м={self.fmt_usd(local_sum1)} agg15м={self.fmt_usd(agg_sum15)}", flush=True)
-
-        st = self.symbol_state[state_key]
-        if self.should_reset_range(st, now):
-            self.reset_range(state_key)
-
-        entry_threshold = float(self.cfg["signals"].get("liq_level_1_usd", 9000))
-        flow_entry_threshold = float(self.cfg["signals"].get("level_1_flow_usd", entry_threshold))
-        min_event_usd = float(self.cfg.get("filters", {}).get("min_event_usd", entry_threshold))
-        local_entry_hit = usd >= entry_threshold or local_sum1 >= flow_entry_threshold
-
-        if usd < min_event_usd and not local_entry_hit and not st["range_active"]:
-            return
-
-        if self.update_monster(state_key, now, usd):
-            snap = {
-                "now": now,
-                "ex": ex,
-                "trigger_usd": max(usd, entry_threshold),
-                "sum15": max(agg_sum15, usd),
-                "cnt": agg_cnt,
-                "level": 10,
-                "monster": True,
-            }
-            signature = f"{symbol}|{snap['ex']}|10|{round(float(snap['sum15']),1)}"
-            if signature != st.get("last_sent_signature", "") or now - st.get("last_sent_ts", 0.0) >= 180:
-                stats = await self.get_symbol_stats(symbol)
-                tf = stats.get("tf", {})
-                oi = stats.get("oi", {})
-                ratio = stats.get("ratio", {})
-                by_sym, _mode = self.resolve_bybit_symbol(symbol)
-                row = {
-                    "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
-                    "symbol": symbol, "exchange": snap["ex"], "label": "MONSTER",
-                    "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"],
-                    "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
-                    "mapped": by_sym or "BY n/a",
-                    "message_id": "",
-                    "rank": stats.get("rank",""),
-                    "price_1h": self.fmt_pct(tf.get("1ч", {}).get("price_pct")),
-                    "price_4h": self.fmt_pct(tf.get("4ч", {}).get("price_pct")),
-                    "price_24h": self.fmt_pct(tf.get("24ч", {}).get("price_pct")),
-                    "oi_now": self.fmt_usd(oi.get("now")),
-                    "oi_5m": self.fmt_pct(oi.get("pct_5m")),
-                    "oi_4h": self.fmt_pct(oi.get("pct_4h")),
-                    "long_pct": self.fmt_pct(ratio.get("long")),
-                    "short_pct": self.fmt_pct(ratio.get("short")),
-                    "funding": self.fmt_pct(stats.get("funding")),
-                }
-                self.signal_history.append(row)
-                print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
-                message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
-                row["message_id"] = message_id or ""
-                st["last_sent_signature"] = signature
-                st["last_sent_ts"] = now
-            st["last_sent_level"] = 10
-            st["max_level_sent"] = 10
-            st["last_level_change_ts"] = now
-            return
-
-        if not st["range_active"]:
-            if not local_entry_hit:
+            if side != "short":
                 return
-            self.open_range(state_key, ex, now)
-            first_sum = max(local_sum1, agg_sum15, usd)
-            first_level = max(1, self.compute_level(entry_threshold, first_sum))
-            entry_snapshot = {
+
+            if usd >= float(self.cfg["filters"]["min_terminal_usd"]):
+                print(f"{ex:<7} {symbol:<18} SHORT {self.fmt_usd(usd)} | local1м={self.fmt_usd(local_sum1)} agg15м={self.fmt_usd(agg_sum15)}", flush=True)
+
+            st = self.symbol_state[state_key]
+            if self.should_reset_range(st, now):
+                self.reset_range(state_key)
+
+            entry_threshold = float(self.cfg["signals"].get("liq_level_1_usd", 9000))
+            flow_entry_threshold = float(self.cfg["signals"].get("level_1_flow_usd", entry_threshold))
+            min_event_usd = float(self.cfg.get("filters", {}).get("min_event_usd", entry_threshold))
+            local_entry_hit = usd >= entry_threshold or local_sum1 >= flow_entry_threshold
+
+            if usd < min_event_usd and not local_entry_hit and not st["range_active"]:
+                return
+
+            if self.update_monster(state_key, now, usd):
+                snap = {
+                    "now": now,
+                    "ex": ex,
+                    "trigger_usd": max(usd, entry_threshold),
+                    "sum15": max(agg_sum15, usd),
+                    "cnt": agg_cnt,
+                    "level": 10,
+                    "monster": True,
+                }
+                signature = f"{symbol}|{snap['ex']}|10|{round(float(snap['sum15']),1)}"
+                if signature != st.get("last_sent_signature", "") or now - st.get("last_sent_ts", 0.0) >= 180:
+                    stats = await self.get_symbol_stats(symbol)
+                    tf = stats.get("tf", {})
+                    oi = stats.get("oi", {})
+                    ratio = stats.get("ratio", {})
+                    by_sym, _mode = self.resolve_bybit_symbol(symbol)
+                    row = {
+                        "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
+                        "symbol": symbol, "exchange": snap["ex"], "label": "MONSTER",
+                        "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"],
+                        "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
+                        "mapped": by_sym or "BY n/a",
+                        "message_id": "",
+                        "rank": stats.get("rank",""),
+                        "price_1h": self.fmt_pct(tf.get("1ч", {}).get("price_pct")),
+                        "price_4h": self.fmt_pct(tf.get("4ч", {}).get("price_pct")),
+                        "price_24h": self.fmt_pct(tf.get("24ч", {}).get("price_pct")),
+                        "oi_now": self.fmt_usd(oi.get("now")),
+                        "oi_5m": self.fmt_pct(oi.get("pct_5m")),
+                        "oi_4h": self.fmt_pct(oi.get("pct_4h")),
+                        "long_pct": self.fmt_pct(ratio.get("long")),
+                        "short_pct": self.fmt_pct(ratio.get("short")),
+                        "funding": self.fmt_pct(stats.get("funding")),
+                    }
+                    self.signal_history.append(row)
+                    print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
+                    message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
+                    row["message_id"] = message_id or ""
+                    st["last_sent_signature"] = signature
+                    st["last_sent_ts"] = now
+                st["last_sent_level"] = 10
+                st["max_level_sent"] = 10
+                st["last_level_change_ts"] = now
+                return
+
+            if not st["range_active"]:
+                if not local_entry_hit:
+                    return
+                self.open_range(state_key, ex, now)
+                first_sum = max(local_sum1, agg_sum15, usd)
+                first_level = max(1, self.compute_level(entry_threshold, first_sum))
+                entry_snapshot = {
+                    "now": now,
+                    "ex": ex,
+                    "trigger_usd": max(usd, entry_threshold),
+                    "sum15": first_sum,
+                    "cnt": max(len(self.events_1m[local_key]), agg_cnt),
+                    "level": first_level,
+                }
+                self.maybe_queue_level(state_key, entry_snapshot)
+                await self.maybe_send_pending(symbol, state_key)
+                return
+
+            if st["last_sent_level"] < 1:
+                await self.maybe_send_pending(symbol, state_key)
+                return
+
+            level = self.compute_level(entry_threshold, agg_sum15)
+            if level < 2:
+                await self.maybe_send_pending(symbol, state_key)
+                return
+
+            snapshot = {
                 "now": now,
                 "ex": ex,
                 "trigger_usd": max(usd, entry_threshold),
-                "sum15": first_sum,
-                "cnt": max(len(self.events_1m[local_key]), agg_cnt),
-                "level": first_level,
+                "sum15": agg_sum15,
+                "cnt": agg_cnt,
+                "level": level,
             }
-            self.maybe_queue_level(state_key, entry_snapshot)
+
+            await self.maybe_send_hyper(symbol, state_key, snapshot)
+
+            if 2 <= level <= 7 and level > max(st["last_sent_level"], st.get("max_level_sent", 0)):
+                self.maybe_queue_level(state_key, snapshot)
+
             await self.maybe_send_pending(symbol, state_key)
-            return
-
-        if st["last_sent_level"] < 1:
-            await self.maybe_send_pending(symbol, state_key)
-            return
-
-        level = self.compute_level(entry_threshold, agg_sum15)
-        if level < 2:
-            await self.maybe_send_pending(symbol, state_key)
-            return
-
-        snapshot = {
-            "now": now,
-            "ex": ex,
-            "trigger_usd": max(usd, entry_threshold),
-            "sum15": agg_sum15,
-            "cnt": agg_cnt,
-            "level": level,
-        }
-
-        await self.maybe_send_hyper(symbol, state_key, snapshot)
-
-        if level > max(st["last_sent_level"], st.get("max_level_sent", 0)):
-            self.maybe_queue_level(state_key, snapshot)
-
-        await self.maybe_send_pending(symbol, state_key)
 
     async def run_binance(self):
         while True:
@@ -1726,8 +1761,8 @@ class Bot:
                 await asyncio.sleep(5)
 
     async def run(self):
-        print("✅ BOT STARTED / V5.7_state_engine", flush=True)
-        await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop())
+        print("✅ BOT STARTED / V5.7.1_state_flush", flush=True)
+        await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop(), self.pending_flush_loop())
 
 
 async def main():
