@@ -1,1 +1,0 @@
-print("Mighty Tiger V7.1 running")

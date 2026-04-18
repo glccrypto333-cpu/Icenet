@@ -22,7 +22,6 @@ import yaml
 BINANCE_WS = "wss://fstream.binance.com/ws/!forceOrder@arr"
 BYBIT_WS = "wss://stream.bybit.com/v5/public/linear"
 BYBIT_INSTRUMENTS_URL = "https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000"
-BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers"
 
 BINANCE_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 BINANCE_24H = "https://fapi.binance.com/fapi/v1/ticker/24hr"
@@ -124,8 +123,6 @@ class Bot:
             "lvl8_active": False,
             "lvl9_active": False,
             "monster_active": False,
-            "monster_base_sum15": 0.0,
-            "cascade_step_sent": 0,
             "last_sent_signature": "",
             "last_sent_ts": 0.0,
             "last_lvl1_signature": "",
@@ -499,8 +496,8 @@ class Bot:
             5: "УРОВЕНЬ 5",
             6: "УРОВЕНЬ 6",
             7: "УРОВЕНЬ 7",
-            8: "HYPER",
-            9: "SUPER HYPER",
+            8: "УРОВЕНЬ 8",
+            9: "УРОВЕНЬ 9",
             10: "MONSTER",
         }
         return labels.get(level, "нет")
@@ -525,8 +522,6 @@ class Bot:
         st["lvl8_active"] = False
         st["lvl9_active"] = False
         st["monster_active"] = False
-        st["monster_base_sum15"] = 0.0
-        st["cascade_step_sent"] = 0
         st["last_sent_signature"] = ""
         st["last_sent_ts"] = 0.0
         st["last_lvl1_signature"] = ""
@@ -548,8 +543,6 @@ class Bot:
         st["lvl8_active"] = False
         st["lvl9_active"] = False
         st["monster_active"] = False
-        st["monster_base_sum15"] = 0.0
-        st["cascade_step_sent"] = 0
         st["last_sent_signature"] = ""
         st["last_sent_ts"] = 0.0
         st["last_lvl1_signature"] = ""
@@ -629,7 +622,7 @@ class Bot:
             f"Уровень 7: {int(s.get('level_7_usd', 150000))}\n"
             f"HYPER: {int(s.get('hyper_usd', 200000))}\n"
             f"SUPER HYPER: {int(s.get('super_hyper_usd', 300000))}\n"
-            f"MONSTER: {int(s.get('monster_3h_usd', 500000))}\n"
+            f"MONSTER 5ч: {int(s.get('monster_3h_usd', 500000))}\n"
             f"Буфер: {int(s.get('range_delay_sec', 30))} сек\n"
             f"Reset диапазона: {int(s.get('range_reset_sec', 900)) // 60} мин\n"
             f"Биржи сигналов: {ex}\n"
@@ -1224,28 +1217,20 @@ class Bot:
         self._cache_set(("oi", symbol), result)
         return result
 
-    async def fetch_bybit_funding(self, symbol):
-        cached = self._cache_get(("funding", "BYBIT", symbol))
+    async def fetch_binance_funding(self, symbol):
+        cached = self._cache_get(("funding", symbol))
         if cached is not None:
             return cached
 
-        by_sym, _mode = self.resolve_bybit_symbol(symbol)
-        if not by_sym:
-            self._cache_set(("funding", "BYBIT", symbol), None)
-            return None
-
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.get(BYBIT_TICKERS_URL, params={"category": "linear", "symbol": by_sym}, timeout=20) as resp:
+                async with session.get(BINANCE_FUNDING, params={"symbol": symbol}, timeout=20) as resp:
                     data = await resp.json()
-                rows = ((data or {}).get("result") or {}).get("list") or []
-                row = rows[0] if rows else {}
-                value = row.get("fundingRate")
-                result = float(value) * 100 if value not in (None, "") else None
+                result = float(data.get("lastFundingRate", 0)) * 100
             except Exception:
                 result = None
 
-        self._cache_set(("funding", "BYBIT", symbol), result)
+        self._cache_set(("funding", symbol), result)
         return result
 
     async def fetch_binance_ratio(self, symbol):
@@ -1276,7 +1261,7 @@ class Bot:
             "rank": await self.get_market_rank(symbol),
             "tf": await self.fetch_binance_stats(symbol),
             "oi": await self.fetch_binance_oi(symbol),
-            "funding": await self.fetch_bybit_funding(symbol),
+            "funding": await self.fetch_binance_funding(symbol),
             "ratio": await self.fetch_binance_ratio(symbol),
         }
 
@@ -1365,7 +1350,7 @@ class Bot:
     def trigger_log_line(self, symbol, snapshot, hyper=False):
         ex = snapshot["ex"]
         level = 10 if snapshot.get("monster") else (9 if snapshot.get("super_hyper") else (8 if hyper else snapshot["level"]))
-        label = "MONSTER" if snapshot.get("monster") else ("SUPER HYPER" if snapshot.get("super_hyper") else ("HYPER" if hyper else self.level_label(level)))
+        label = "MONSTER" if snapshot.get("monster") else ("SUPER HYPER" if snapshot.get("super_hyper") else ("HYPER" if hyper else f"LVL{level}"))
         return (
             f"TRIGGER {symbol} {ex} {label} "
             f"event={self.fmt_usd(snapshot['trigger_usd'])} "
@@ -1381,8 +1366,6 @@ class Bot:
         level = snapshot["level"]
         super_hyper = snapshot.get("super_hyper", False)
         monster = snapshot.get("monster", False)
-        cascade_step = int(snapshot.get("cascade_step", 0) or 0)
-        cascade_extra_usd = int(snapshot.get("cascade_extra_usd", 0) or 0)
 
         if monster:
             top_line = f"💀 {symbol_safe} AGG - {self.fmt_usd(sum15)}"
@@ -1409,11 +1392,9 @@ class Bot:
         elif mode == "na":
             mapping_note = "\n⚠️ Нет точного тикера на Bybit"
 
-        cascade_line = f"\n<b>КАСКАД: +{cascade_extra_usd:,}$</b>".replace(",", " ") if monster and cascade_step > 0 else ""
-
         return (
             f"<b>{top_line}</b>\n"
-            f"<b>{header}</b>{cascade_line}\n\n"
+            f"<b>{header}</b>\n\n"
             f"Событие: {self.fmt_usd(trigger_usd)}\n"
             f"Поток 15м: {trigger_flow}{mapping_note}\n\n"
             f"{self.render_blocks(stats, compact_oi=True)}\n\n"
@@ -1445,11 +1426,6 @@ class Bot:
         snap = dict(st["pending_snapshot"])
         if snap.get("level") == 10:
             snap["monster"] = True
-            if float(st.get("monster_base_sum15", 0.0) or 0.0) <= 0:
-                st["monster_base_sum15"] = float(snap["sum15"])
-                st["cascade_step_sent"] = 0
-            snap["cascade_step"] = int(st.get("cascade_step_sent", 0) or 0)
-            snap["cascade_extra_usd"] = int(st.get("cascade_step_sent", 0) or 0) * 100000
         elif snap.get("level") == 9:
             snap["super_hyper"] = True
         signature = f"{symbol}|{snap['ex']}|{snap['level']}|{round(float(snap['sum15']),1)}"
@@ -1506,8 +1482,6 @@ class Bot:
         st["last_sent_signature"] = signature
         st["last_sent_ts"] = now
         self.mark_state_signal_sent(st, state_sig, now)
-        if snap["level"] == 10:
-            st["monster_active"] = True
         if snap["level"] == 1:
             st["last_lvl1_signature"] = signature
             st["last_lvl1_ts"] = now
@@ -1529,62 +1503,6 @@ class Bot:
         snap = dict(snapshot)
         snap["level"] = lvl
         self.maybe_queue_level(state_key, snap)
-
-    async def maybe_send_cascade(self, symbol, state_key, snapshot):
-        st = self.symbol_state[state_key]
-        if st.get("last_sent_level", 0) < 10:
-            return
-
-        base = float(st.get("monster_base_sum15", 0.0) or 0.0)
-        if base <= 0:
-            return
-
-        cascade_step = int(snapshot.get("cascade_step", 0) or 0)
-        if cascade_step <= int(st.get("cascade_step_sent", 0) or 0):
-            return
-
-        snap = dict(snapshot)
-        snap["level"] = 10
-        snap["monster"] = True
-        snap["cascade_step"] = cascade_step
-        snap["cascade_extra_usd"] = cascade_step * 100000
-
-        now = time.time()
-        signature = f"{symbol}|{snap['ex']}|MONSTER|C{cascade_step}|{round(float(snap['sum15']),1)}"
-        stats = await self.get_symbol_stats(symbol)
-
-        tf = stats.get("tf", {})
-        oi = stats.get("oi", {})
-        ratio = stats.get("ratio", {})
-        by_sym, _mode = self.resolve_bybit_symbol(symbol)
-        row = {
-            "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
-            "symbol": symbol, "exchange": snap["ex"], "label": f"MONSTER +{cascade_step * 100}k",
-            "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"],
-            "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
-            "mapped": by_sym or "BY n/a",
-            "message_id": "",
-            "rank": stats.get("rank",""),
-            "price_1h": self.fmt_pct(tf.get("1ч", {}).get("price_pct")),
-            "price_4h": self.fmt_pct(tf.get("4ч", {}).get("price_pct")),
-            "price_24h": self.fmt_pct(tf.get("24ч", {}).get("price_pct")),
-            "oi_now": self.fmt_usd(oi.get("now")),
-            "oi_5m": self.fmt_pct(oi.get("pct_5m")),
-            "oi_4h": self.fmt_pct(oi.get("pct_4h")),
-            "long_pct": self.fmt_pct(ratio.get("long")),
-            "short_pct": self.fmt_pct(ratio.get("short")),
-            "funding": self.fmt_pct(stats.get("funding")),
-        }
-        self.signal_history.append(row)
-
-        print(self.trigger_log_line(symbol, snap, hyper=False) + f" CASCADE +{cascade_step * 100}k", flush=True)
-        message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
-        row["message_id"] = message_id or ""
-
-        st["cascade_step_sent"] = cascade_step
-        st["last_level_change_ts"] = now
-        st["last_sent_signature"] = signature
-        st["last_sent_ts"] = now
     async def pending_flush_loop(self):
         while not self.stop_event.is_set():
             try:
@@ -1658,7 +1576,7 @@ class Bot:
             if usd < min_event_usd and not local_entry_hit and not st["range_active"]:
                 return
 
-            monster_threshold = float(self.cfg["signals"].get("monster_3h_usd", 500000))
+            monster_total, monster_hit = self.update_monster(state_key, now, usd)
 
             if not st["range_active"]:
                 if not local_entry_hit:
@@ -1666,12 +1584,6 @@ class Bot:
                 self.open_range(state_key, ex, now)
                 first_sum = max(local_sum1, agg_sum15, usd)
                 first_level = max(1, self.compute_level(entry_threshold, first_sum))
-                if float(first_sum) >= monster_threshold:
-                    first_level = 10
-                elif float(first_sum) >= float(self.cfg["signals"].get("super_hyper_usd", 300000)):
-                    first_level = 9
-                elif float(first_sum) >= float(self.cfg["signals"].get("hyper_usd", 200000)):
-                    first_level = 8
                 entry_snapshot = {
                     "now": now,
                     "ex": ex,
@@ -1689,12 +1601,15 @@ class Bot:
                 return
 
             level = self.compute_level(entry_threshold, agg_sum15)
-            if float(agg_sum15) >= monster_threshold:
-                level = 10
-            elif float(agg_sum15) >= float(self.cfg["signals"].get("super_hyper_usd", 300000)):
+            if float(agg_sum15) >= float(self.cfg["signals"].get("super_hyper_usd", 300000)):
                 level = 9
             elif float(agg_sum15) >= float(self.cfg["signals"].get("hyper_usd", 200000)):
                 level = 8
+            if monster_hit:
+                level = 10
+            if level < 2:
+                await self.maybe_send_pending(symbol, state_key)
+                return
 
             snapshot = {
                 "now": now,
@@ -1704,23 +1619,6 @@ class Bot:
                 "cnt": agg_cnt,
                 "level": level,
             }
-
-            if level < 2 and st.get("last_sent_level", 0) < 10:
-                await self.maybe_send_pending(symbol, state_key)
-                return
-
-            if st.get("last_sent_level", 0) >= 10:
-                snapshot["level"] = 10
-                base = float(st.get("monster_base_sum15", 0.0) or 0.0)
-                if base > 0:
-                    extra = max(0.0, float(agg_sum15) - base)
-                    cascade_step = int(extra // 100000)
-                    snapshot["cascade_step"] = cascade_step
-                    snapshot["cascade_extra_usd"] = cascade_step * 100000
-                    if cascade_step > int(st.get("cascade_step_sent", 0) or 0):
-                        await self.maybe_send_cascade(symbol, state_key, snapshot)
-                await self.maybe_send_pending(symbol, state_key)
-                return
 
             if 2 <= level <= 10 and level > max(st["last_sent_level"], st.get("max_level_sent", 0)):
                 self.maybe_queue_level(state_key, snapshot)
