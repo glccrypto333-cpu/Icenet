@@ -30,9 +30,7 @@ signals:
   range_delay_sec: 30
   range_reset_sec: 900
   hyper_5m_usd: 150000
-  hyper_cooldown_sec: 300
   monster_3h_usd: 500000
-  monster_mute_sec: 10800
   allowed_exchanges:
   - BINANCE
   - BYBIT
@@ -44,7 +42,6 @@ signals:
   level_7_usd: 150000
   hyper_usd: 200000
   super_hyper_usd: 300000
-  super_hyper_cooldown_sec: 3600
   level_1_flow_usd: 10000
 runtime:
   watchdog_enabled: true
@@ -123,3 +120,5 @@ symbols:
   - XRPUSDT
   - ZECUSDT
   - 币安人生USDT
+  - BTCUSDT_260925
+  - 我踏马来了USDT
