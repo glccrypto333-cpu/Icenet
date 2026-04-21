@@ -48,13 +48,11 @@ if hasattr(time, "tzset"):
 TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
-MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
-DAILY_CYCLES_RUNTIME_FILE = RUNTIME / "daily_cycles_runtime.json"
-
-MSK_TZ = ZoneInfo("Europe/Moscow")
 
 BUILD_VERSION = "V7_work.2"
 BUILD_DATE = "2026-04-21"
+
+MSK_TZ = ZoneInfo("Europe/Moscow")
 
 
 def load():
@@ -149,8 +147,6 @@ class Bot:
             "last_state_signature": "",
             "last_state_ts": 0.0,
             "anomaly_debug_ts": 0.0,
-            "cycle_no": 0,
-            "cycle_day_key": "",
         })
 
         self.binance_cache = {}
@@ -166,7 +162,8 @@ class Bot:
         self.chat_history = deque(maxlen=10000)
         self.state_locks = {}
         self.control_state = {"awaiting_key": None}
-        self.daily_cycles = self.load_daily_cycles_runtime()
+        self.daily_cycle_state = defaultdict(lambda: {"day": "", "completed": 0, "active_cycle": 0})
+        self.pause_list = set()
         self.limit_button_map = {
             "1️⃣ Уровень 1": "signals.liq_level_1_usd",
             "2️⃣ Уровень 2": "signals.level_2_usd",
@@ -225,47 +222,22 @@ class Bot:
         self.mode_menu = {
             "keyboard": [
                 [{"text": "🟢 Normal"}, {"text": "🟡 Fast test"}],
-                [{"text": "🟠 Power day"}, {"text": "⚫ OFF"}],
+                [{"text": "🟠 Power day"}],
                 [{"text": "↩️ Назад"}],
             ],
             "resize_keyboard": True,
             "is_persistent": True,
         }
-        self.reload_menu = {
-            "keyboard": [
-                [{"text": "♻️ Reload"}, {"text": "🔁 Restart"}],
-                [{"text": "↩️ Назад"}],
-            ],
-            "resize_keyboard": True,
-            "is_persistent": True,
-        }
+        
         self.help_menu = {
             "keyboard": [
-                [{"text": "📛 Блок лист"}, {"text": "🔕 Mute лист"}],
-                [{"text": "↩️ Назад"}],
-            ],
-            "resize_keyboard": True,
-            "is_persistent": True,
-        }
-        self.block_menu = {
-            "keyboard": [
-                [{"text": "📋 Список BL"}],
+                [{"text": "📛 Блок лист"}],
                 [{"text": "➕ Добавить в блок лист"}, {"text": "➖ Убрать из блок листа"}],
                 [{"text": "↩️ Назад"}],
             ],
             "resize_keyboard": True,
             "is_persistent": True,
         }
-        self.mute_menu = {
-            "keyboard": [
-                [{"text": "📋 Список ML"}],
-                [{"text": "➕ Добавить в mute лист"}, {"text": "➖ Убрать из mute листа"}],
-                [{"text": "↩️ Назад"}],
-            ],
-            "resize_keyboard": True,
-            "is_persistent": True,
-        }
-
         self.limit_menu = {
             "keyboard": [
                 [{"text": "1️⃣ Уровень 1"}, {"text": "2️⃣ Уровень 2"}],
@@ -333,6 +305,64 @@ class Bot:
             await asyncio.sleep(5)
 
     # ========= format =========
+
+    def msk_now(self):
+        return datetime.now(MSK_TZ)
+
+    def msk_day_key(self, ts=None):
+        dt = datetime.fromtimestamp(ts, MSK_TZ) if ts is not None else self.msk_now()
+        if dt.hour == 0 and dt.minute == 0:
+            dt = dt - timedelta(days=1)
+        return dt.strftime("%Y-%m-%d")
+
+    def daily_cycle_no(self, symbol, now_ts=None):
+        key = self.msk_day_key(now_ts)
+        row = self.daily_cycle_state[symbol]
+        if row["day"] != key:
+            row["day"] = key
+            row["completed"] = 0
+            row["active_cycle"] = 0
+        if row["active_cycle"] <= 0:
+            row["active_cycle"] = row["completed"] + 1
+        return row["active_cycle"]
+
+    def complete_cycle(self, symbol, now_ts=None):
+        key = self.msk_day_key(now_ts)
+        row = self.daily_cycle_state[symbol]
+        if row["day"] != key:
+            row["day"] = key
+            row["completed"] = 0
+            row["active_cycle"] = 0
+            return
+        if row["active_cycle"] > 0:
+            row["completed"] += 1
+            row["active_cycle"] = 0
+
+    def load_runtime_mute_list(self):
+        return []
+
+    def save_runtime_mute_list(self, items):
+        return
+
+    def current_mute_list(self):
+        return sorted(set(self.pause_list))
+
+    def mutelist_text(self):
+        items = self.current_mute_list()
+        if not items:
+            return "<b>Mute лист</b>\n\nПусто."
+        out = ["<b>Mute лист</b>", ""]
+        for i, sym in enumerate(items, 1):
+            out.append(f"{i}. {self.esc(sym)}")
+        return "\n".join(out)
+
+    def is_paused(self, symbol):
+        return symbol in self.pause_list
+
+    def schedule_symbol_reload(self):
+        self.bybit_symbols_cache = None
+        self.bybit_symbols_cache_ts = 0
+
     def fmt_usd(self, v):
         if v is None:
             return "н/д"
@@ -364,61 +394,39 @@ class Bot:
             return self.level_marks(1)
         return ""
 
-    def metric_bang_count(self, value, thresholds):
-        if value is None:
-            return 0
-        av = abs(float(value))
-        if av > thresholds[2]:
-            return 3
-        if av > thresholds[1]:
-            return 2
-        if av > thresholds[0]:
-            return 1
-        return 0
-
-    def metric_pct_text(self, value, thresholds):
-        if value is None:
+    def metric_with_marks(self, v, thresholds, funding_mode=False):
+        if v is None:
             return "н/д"
-        arrow = "⬆️" if float(value) > 0 else ("⬇️" if float(value) < 0 else "")
-        bangs = "❗️" * self.metric_bang_count(value, thresholds)
-        core = self.fmt_pct(value)
-        return f"{arrow} {core}{bangs}".strip()
-
-    def funding_text(self, funding):
-        if funding is None:
-            return "н/д"
-        arrow = "⬆️" if float(funding) > 0 else ("⬇️" if float(funding) < 0 else "")
-        bangs = ""
-        av = abs(float(funding))
-        if funding < -1:
-            bangs = "❗️❗️❗️"
-        elif funding < -0.5:
-            bangs = "❗️❗️"
-        elif funding < -0.1:
-            bangs = "❗️"
-        core = self.fmt_pct(funding)
-        return f"{arrow} {core}{bangs}".strip()
+        arrow = "⬆️" if v > 0 else "⬇️"
+        av = abs(v)
+        mark = ""
+        if funding_mode:
+            if v <= -thresholds[2]:
+                mark = "❗️❗️❗️"
+            elif v <= -thresholds[1]:
+                mark = "❗️❗️"
+            elif v <= -thresholds[0]:
+                mark = "❗️"
+        else:
+            if av > thresholds[2]:
+                mark = "❗️❗️❗️"
+            elif av > thresholds[1]:
+                mark = "❗️❗️"
+            elif av > thresholds[0]:
+                mark = "❗️"
+        return f"{arrow} {self.fmt_pct(v)}{mark}"
 
     def directional_mark(self, v, mild=5.0, strong=12.0):
-        return self.metric_pct_text(v, (100.0, 1000.0, 10000.0))
+        return self.metric_with_marks(v, [100, 1000, 10000])
 
     def price_mark(self, v, mild=8.0):
-        return self.metric_pct_text(v, (10.0, 25.0, 100.0))
+        return self.metric_with_marks(v, [10, 25, 100])
 
     def oi_mark(self, v, mild=1.0):
-        return self.metric_pct_text(v, (10.0, 25.0, 100.0))
-
-    def sentiment_accounts(self, long_pct, short_pct):
-        if long_pct is None or short_pct is None:
-            return ("", "")
-        if long_pct > short_pct:
-            return ("⬆️", "⬇️")
-        if short_pct > long_pct:
-            return ("⬇️", "⬆️")
-        return ("", "")
+        return self.metric_with_marks(v, [10, 25, 100])
 
     def funding_mark(self, funding):
-        return self.funding_text(funding)
+        return self.metric_with_marks(funding, [0.1, 0.5, 1], funding_mode=True)
 
     def mark_usd(self, v, thr):
         prefix = (self.level_marks(3) + " ") if (v is not None and v >= thr) else ""
@@ -465,93 +473,6 @@ class Bot:
 
         spacer = ("ㅤ" * 12) + "   "
         return f"{left}{spacer}{elapsed_text}"
-
-    def msk_now(self):
-        return datetime.now(MSK_TZ)
-
-    def msk_day_key(self, dt=None):
-        dt = dt or self.msk_now()
-        return dt.strftime("%Y-%m-%d")
-
-    def load_runtime_mute_list(self):
-        if not MUTE_RUNTIME_FILE.exists():
-            return []
-        try:
-            return json.loads(MUTE_RUNTIME_FILE.read_text(encoding="utf-8")) or []
-        except Exception:
-            return []
-
-    def save_runtime_mute_list(self, items):
-        try:
-            MUTE_RUNTIME_FILE.write_text(json.dumps(sorted(set(items)), ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as e:
-            print(f"Mute list save error: {e!r}", flush=True)
-
-    def current_mute_list(self):
-        return sorted(set(self.load_runtime_mute_list()))
-
-    def mutelist_text(self):
-        items = self.current_mute_list()
-        if not items:
-            return "<b>Mute лист</b>\n\nПока пусто."
-        body = "\n".join(f"• <code>{self.esc(x)}</code>" for x in items)
-        return f"<b>Mute лист</b>\n\n{body}"
-
-    def load_daily_cycles_runtime(self):
-        if not DAILY_CYCLES_RUNTIME_FILE.exists():
-            return {}
-        try:
-            return json.loads(DAILY_CYCLES_RUNTIME_FILE.read_text(encoding="utf-8")) or {}
-        except Exception:
-            return {}
-
-    def save_daily_cycles_runtime(self):
-        try:
-            DAILY_CYCLES_RUNTIME_FILE.write_text(json.dumps(self.daily_cycles, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as e:
-            print(f"Daily cycles save error: {e!r}", flush=True)
-
-    def completed_cycles_for_day(self, symbol, day_key=None):
-        day_key = day_key or self.msk_day_key()
-        return int(self.daily_cycles.get(day_key, {}).get(symbol, 0) or 0)
-
-    def assign_cycle_on_open(self, symbol, st, now_ts):
-        day_key = self.msk_day_key(datetime.fromtimestamp(now_ts, MSK_TZ))
-        st["cycle_day_key"] = day_key
-        st["cycle_no"] = self.completed_cycles_for_day(symbol, day_key) + 1
-
-    def finalize_cycle_on_reset(self, symbol, st):
-        cycle_no = int(st.get("cycle_no", 0) or 0)
-        day_key = st.get("cycle_day_key") or self.msk_day_key()
-        if not cycle_no:
-            return
-        self.daily_cycles.setdefault(day_key, {})
-        current = int(self.daily_cycles[day_key].get(symbol, 0) or 0)
-        if current < cycle_no:
-            self.daily_cycles[day_key][symbol] = cycle_no
-            self.save_daily_cycles_runtime()
-
-    async def reload_exchange_symbols(self, force=True):
-        try:
-            if force:
-                self.bybit_symbols_cache = None
-                self.bybit_symbols_cache_ts = 0
-            symbols = await self.get_all_bybit_symbols()
-            print(f"♻️ SYMBOL RELOAD OK: {len(symbols)}", flush=True)
-            return len(symbols)
-        except Exception as e:
-            print(f"♻️ SYMBOL RELOAD ERROR: {e!r}", flush=True)
-            return 0
-
-    async def ticker_refresh_loop(self):
-        last_run_key = ""
-        while not self.stop_event.is_set():
-            now_msk = self.msk_now()
-            run_key = now_msk.strftime("%Y-%m-%d %H")
-            if now_msk.hour == 3 and run_key != last_run_key:
-                await self.reload_exchange_symbols(force=True)
-                last_run_key = run_key
-            await asyncio.sleep(20)
 
     async def send_timer_anomaly_debug(self, symbol, st, now, elapsed_sec, source_label):
         debug_chat_id = str(self.cfg.get("telegram", {}).get("debug_chat_id", "") or "").strip()
@@ -734,9 +655,6 @@ class Bot:
 
     def reset_range(self, state_key):
         st = self.symbol_state[state_key]
-        symbol = state_key[1]
-        if st.get("range_active"):
-            self.finalize_cycle_on_reset(symbol, st)
         st["range_active"] = False
         st["range_start_ts"] = 0.0
         st["range_exchange"] = ""
@@ -758,12 +676,9 @@ class Bot:
         st["last_state_signature"] = ""
         st["last_state_ts"] = 0.0
         st["anomaly_debug_ts"] = 0.0
-        st["cycle_no"] = 0
-        st["cycle_day_key"] = ""
 
     def open_range(self, state_key, ex, now):
         st = self.symbol_state[state_key]
-        symbol = state_key[1]
         st["range_active"] = True
         st["range_start_ts"] = now
         st["range_exchange"] = ex
@@ -785,7 +700,6 @@ class Bot:
         st["last_state_signature"] = ""
         st["last_state_ts"] = 0.0
         st["anomaly_debug_ts"] = 0.0
-        self.assign_cycle_on_open(symbol, st, now)
 
     def events_word(self, n):
         n = int(n)
@@ -843,7 +757,7 @@ class Bot:
         f = self.cfg.get("filters", {})
         ex = ",".join(s.get("allowed_exchanges", ["BINANCE", "BYBIT"]))
         mode = str(self.cfg.get("runtime", {}).get("signal_mode", "combat"))
-        mode_text = "Fast test" if mode == "fast_test" else ("Power day" if mode == "power_day" else "Normal")
+        mode_text = "Fast test" if mode == "fast_test" else ("Power day" if mode == "power_day" else ("OFF" if mode == "off" else "Normal"))
         liq1 = int(s.get("liq_level_1_usd", 9000))
         flow1 = int(s.get("level_1_flow_usd", liq1))
         min_event_effective = int(f.get("min_event_usd", liq1))
@@ -878,21 +792,19 @@ class Bot:
         )
 
     def prune_market_events(self, ex, now, hours=0.5):
-        store = self.market_events_4h if hours >= 4 else self.market_events_30m
-        ttl = 14400 if hours >= 4 else 1800
-        dq = store[ex]
-        while dq and now - dq[0]["ts"] > ttl:
+        dq = self.market_events_4h[ex] if hours >= 4 else self.market_events_30m[ex]
+        max_age = 14400 if hours >= 4 else 1800
+        while dq and now - dq[0]["ts"] > max_age:
             dq.popleft()
 
     def format_top_window(self, ex, hours=0.5):
         now = time.time()
         self.prune_market_events(ex, now, hours=hours)
-        store = self.market_events_4h if hours >= 4 else self.market_events_30m
-        min_key = "top4h_min_usd" if hours >= 4 else "top30_min_usd"
-        min_usd = float(self.cfg.get("filters", {}).get(min_key, self.cfg.get("filters", {}).get("top30_min_usd", 3000)))
+        min_usd = float(self.cfg.get("filters", {}).get("top30_min_usd", 3000))
 
         agg = {}
-        for row in store[ex]:
+        source = self.market_events_4h[ex] if hours >= 4 else self.market_events_30m[ex]
+        for row in source:
             sym = row["symbol"]
             agg[sym] = agg.get(sym, 0.0) + float(row["usd"])
 
@@ -900,8 +812,8 @@ class Bot:
         rows.sort(key=lambda x: x[1], reverse=True)
         rows = rows[:10]
 
-        period = "4ч" if hours >= 4 else "30м"
-        header = f"<b>Топ 10 ликвидаций за {period} — {ex}</b>\n<i>с момента запуска бота</i>"
+        span = "4ч" if hours >= 4 else "30м"
+        header = f"<b>Топ 10 ликвидаций за {span} — {ex}</b>\n<i>с момента запуска бота</i>"
         if not rows:
             return f"{header}\n\nПока пусто от {self.fmt_usd(min_usd)}."
 
@@ -955,31 +867,22 @@ class Bot:
     def help_text(self):
         return (
             "<b>Команды управления</b>\n\n"
-            f"Сборка: <b>{BUILD_VERSION}</b>\n"
-            f"Заливка: <b>{BUILD_DATE}</b>\n\n"
+            f"Сборка: <b>{BUILD_VERSION}</b> - актуальная версия\n"
+            f"Заливка: <b>{BUILD_DATE}</b> - актуальная дата\n\n"
             "/limits — показать лимиты\n"
             "/top30_binance — топ 10 ликвидаций Binance за 30 минут\n"
             "/top30_bybit — топ 10 ликвидаций Bybit за 30 минут\n"
-            "/reload — открыть меню Reload / Restart\n"
+            "/top4h_binance — топ 10 ликвидаций Binance за 4 часа\n"
+            "/top4h_bybit — топ 10 ликвидаций Bybit за 4 часа\n"
+            "/reload — перечитать config + runtime_overrides\n"
             "/export_chat_24h — выгрузить историю чата за 24ч\n"
             "/set section.key value — изменить лимит\n\n"
             "В Help:\n"
-            "📛 Блок лист\n"
-            "🔕 Mute лист"
+            "📛 Блок лист\n\n"
+            "🔕 Mute лист\n"
+            "     -➕ Добавить в блок лист\n"
+            "     -➖ Убрать из блок листа"
         )
-
-    async def telegram_api(self, method, payload):
-        url = f"https://api.telegram.org/bot{self.cfg['telegram']['bot_token']}/{method}"
-        async with aiohttp.ClientSession() as s:
-            async with s.post(url, json=payload, timeout=60) as resp:
-                try:
-                    data = await resp.json()
-                except Exception:
-                    body = await resp.text()
-                    print(f"Telegram {method}: {resp.status} {body[:160]}", flush=True)
-                    return None
-                print(f"Telegram {method}: {resp.status}", flush=True)
-                return data
 
     def export_signals_text(self):
         now = time.time()
@@ -1063,21 +966,23 @@ class Bot:
             self.cfg["signals"]["range_reset_sec"] = 900
             self.cfg["filters"]["min_event_usd"] = 25000
         elif mode_name == "off":
-            huge = 10000000
-            self.cfg["signals"]["liq_level_1_usd"] = huge
-            self.cfg["signals"]["level_1_flow_usd"] = huge
-            self.cfg["signals"]["level_2_usd"] = huge
-            self.cfg["signals"]["level_3_usd"] = huge
-            self.cfg["signals"]["level_4_usd"] = huge
-            self.cfg["signals"]["level_5_usd"] = huge
-            self.cfg["signals"]["level_6_usd"] = huge
-            self.cfg["signals"]["level_7_usd"] = huge
-            self.cfg["signals"]["hyper_usd"] = huge
-            self.cfg["signals"]["super_hyper_usd"] = huge
-            self.cfg["signals"]["monster_3h_usd"] = huge
+            self.cfg["signals"]["liq_level_1_usd"] = 10000000
+            self.cfg["signals"]["level_1_flow_usd"] = 10000000
+            self.cfg["signals"]["level_2_usd"] = 10000000
+            self.cfg["signals"]["level_3_usd"] = 10000000
+            self.cfg["signals"]["level_4_usd"] = 10000000
+            self.cfg["signals"]["level_5_usd"] = 10000000
+            self.cfg["signals"]["level_6_usd"] = 10000000
+            self.cfg["signals"]["level_7_usd"] = 10000000
+            self.cfg["signals"]["hyper_usd"] = 10000000
+            self.cfg["signals"]["super_hyper_usd"] = 10000000
+            self.cfg["signals"]["hyper_cooldown_sec"] = 300
+            self.cfg["signals"]["super_hyper_cooldown_sec"] = 3600
+            self.cfg["signals"]["monster_3h_usd"] = 10000000
+            self.cfg["signals"]["monster_mute_sec"] = 10800
             self.cfg["signals"]["range_delay_sec"] = 30
             self.cfg["signals"]["range_reset_sec"] = 900
-            self.cfg["filters"]["min_event_usd"] = huge
+            self.cfg["filters"]["min_event_usd"] = 10000000
         else:
             self.cfg["signals"]["liq_level_1_usd"] = 9000
             self.cfg["signals"]["level_1_flow_usd"] = 10000
@@ -1097,7 +1002,6 @@ class Bot:
             self.cfg["signals"]["range_reset_sec"] = 900
             self.cfg["filters"]["min_event_usd"] = 9000
         self.cfg["filters"]["top30_min_usd"] = 3000
-        self.cfg["filters"]["top4h_min_usd"] = self.cfg["filters"].get("top4h_min_usd", 3000)
         return self.format_limits()
 
     async def handle_control_command(self, text):
@@ -1115,29 +1019,25 @@ class Bot:
                     items.append(sym)
                     self.save_runtime_blocklist(items)
                 self.control_state["awaiting_key"] = None
-                return f"✅ Добавлен в блок лист: <code>{self.esc(sym)}</code>", self.block_menu
+                return f"✅ Добавлен в блок лист: <code>{self.esc(sym)}</code>", self.blocklist_menu
             if key == "__remove_block__":
                 items = self.load_runtime_blocklist()
                 sym = text.strip().upper()
                 items = [x for x in items if x != sym]
                 self.save_runtime_blocklist(items)
                 self.control_state["awaiting_key"] = None
-                return f"✅ Убран из блок листа: <code>{self.esc(sym)}</code>", self.block_menu
+                return f"✅ Убран из блок листа: <code>{self.esc(sym)}</code>", self.blocklist_menu
             if key == "__add_mute__":
-                items = self.load_runtime_mute_list()
                 sym = text.strip().upper()
-                if sym and sym not in items:
-                    items.append(sym)
-                    self.save_runtime_mute_list(items)
+                if sym:
+                    self.pause_list.add(sym)
                 self.control_state["awaiting_key"] = None
-                return f"✅ Добавлен в mute лист: <code>{self.esc(sym)}</code>", self.mute_menu
+                return f"✅ Добавлен в Mute лист: <code>{self.esc(sym)}</code>", self.mutelist_menu
             if key == "__remove_mute__":
-                items = self.load_runtime_mute_list()
                 sym = text.strip().upper()
-                items = [x for x in items if x != sym]
-                self.save_runtime_mute_list(items)
+                self.pause_list.discard(sym)
                 self.control_state["awaiting_key"] = None
-                return f"✅ Убран из mute листа: <code>{self.esc(sym)}</code>", self.mute_menu
+                return f"✅ Убран из Mute листа: <code>{self.esc(sym)}</code>", self.mutelist_menu
             try:
                 parsed = self.parse_override_value(key, text)
                 overrides = self.load_runtime_overrides()
@@ -1152,7 +1052,7 @@ class Bot:
                 return f"❌ Ошибка: {e}\nПовтори ввод или нажми ↩️ Назад", self.limit_menu
 
         if text in ("🏆 TOP", "/top"):
-            return "<b>TOP</b>\n\nВыбери биржу.", self.top_menu
+            return "<b>TOP</b>\n\nВыбери окно и биржу.", self.top_menu
         if text in ("📥 Скачать", "/download"):
             return "<b>Скачать</b>\n\nВыбери тип выгрузки.", self.download_menu
         if text in ("/export_24h", "📤 Сигналы 24ч"):
@@ -1166,13 +1066,15 @@ class Bot:
             ok = await self.send_document_text(fname, payload, caption="<b>История чата за 24ч</b>")
             return ("✅ Файл с историей чата за 24ч отправлен." if ok else "❌ Не удалось отправить файл."), self.download_menu
         if text in ("⚙️ Режим", "/mode"):
-            return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000", self.mode_menu
+            return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000\n⚫ OFF — уведомления отключены", self.mode_menu
         if text == "🟢 Normal":
             return "✅ Режим переключен: <b>Normal</b>\n\n" + self.apply_signal_mode("combat"), self.keyboard
         if text == "🟡 Fast test":
             return "✅ Режим переключен: <b>Fast test</b>\n\n" + self.apply_signal_mode("fast_test"), self.keyboard
         if text == "🟠 Power day":
             return "✅ Режим переключен: <b>Power day</b>\n\n" + self.apply_signal_mode("power_day"), self.keyboard
+        if text == "⚫ OFF":
+            return "✅ Режим переключен: <b>OFF</b>\n\n" + self.apply_signal_mode("off"), self.keyboard
 
         if text in ("/limits", "📊 Лимиты"):
             return self.format_limits(), self.limit_menu
@@ -1180,17 +1082,17 @@ class Bot:
             return self.format_top30("BINANCE"), self.top_menu
         if text in ("/top30_bybit", "/top15_bybit", "🏆 BYBIT /30м", "🏆 BYBIT /15м"):
             return self.format_top30("BYBIT"), self.top_menu
-        if text in ("🏆 BINANCE /4ч", "/top4h_binance"):
+        if text in ("/top4h_binance", "🏆 BINANCE /4ч"):
             return self.format_top4h("BINANCE"), self.top_menu
-        if text in ("🏆 BYBIT /4ч", "/top4h_bybit"):
+        if text in ("/top4h_bybit", "🏆 BYBIT /4ч"):
             return self.format_top4h("BYBIT"), self.top_menu
         if text in ("/reload", "🔄 Reload"):
             return "<b>Reload</b>\n\nВыбери действие.", self.reload_menu
-        if text == "♻️ Reload":
+        if text == "🔄 Reload config":
             self.cfg = load()
             return "✅ Конфиг и overrides перечитаны.", self.keyboard
-        if text == "🔁 Restart":
-            await self.send("♻️ Перезапуск бота...", reply_markup=self.keyboard, count_signal=False, kind="message")
+        if text == "♻️ Restart bot":
+            await self.send("♻️ Перезапуск бота...", reply_markup=self.keyboard, count_signal=False, kind="service")
             os.execv(sys.executable, [sys.executable] + sys.argv)
         if text in ("❓ Help",):
             self.control_state["awaiting_key"] = None
@@ -1198,26 +1100,29 @@ class Bot:
         if text in ("/help", "/start", "↩️ Назад"):
             self.control_state["awaiting_key"] = None
             return self.help_text(), self.keyboard
+        if text == "↩️ Help":
+            self.control_state["awaiting_key"] = None
+            return self.help_text(), self.help_menu
         if text == "📛 Блок лист":
-            return self.blocklist_text(), self.block_menu
+            return "<b>Блок лист</b>\n\nВыбери действие.", self.blocklist_menu
         if text == "🔕 Mute лист":
-            return self.mutelist_text(), self.mute_menu
-        if text == "📋 Список BL":
-            return self.blocklist_text(), self.block_menu
-        if text == "📋 Список ML":
-            return self.mutelist_text(), self.mute_menu
+            return "<b>Mute лист</b>\n\nВыбери действие.", self.mutelist_menu
+        if text == "📄 Блок лист список":
+            return self.blocklist_text(), self.blocklist_menu
+        if text == "📄 Mute лист список":
+            return self.mutelist_text(), self.mutelist_menu
         if text == "➕ Добавить в блок лист":
             self.control_state["awaiting_key"] = "__add_block__"
-            return "Пришли тикер для добавления в блок лист", self.block_menu
+            return "Пришли тикер для добавления в блок лист", self.blocklist_menu
         if text == "➖ Убрать из блок листа":
             self.control_state["awaiting_key"] = "__remove_block__"
-            return "Пришли тикер для удаления из блок листа", self.block_menu
-        if text == "➕ Добавить в mute лист":
+            return "Пришли тикер для удаления из блок листа", self.blocklist_menu
+        if text == "➕ Добавить в Mute лист":
             self.control_state["awaiting_key"] = "__add_mute__"
-            return "Пришли тикер для добавления в mute лист", self.mute_menu
-        if text == "➖ Убрать из mute листа":
+            return "Пришли тикер для добавления в Mute лист", self.mutelist_menu
+        if text == "➖ Убрать из Mute листа":
             self.control_state["awaiting_key"] = "__remove_mute__"
-            return "Пришли тикер для удаления из mute листа", self.mute_menu
+            return "Пришли тикер для удаления из Mute листа", self.mutelist_menu
 
         if text in self.limit_button_map:
             key = self.limit_button_map[text]
@@ -1292,11 +1197,8 @@ class Bot:
                 print(f"Telegram control error: {e!r}", flush=True)
                 await asyncio.sleep(5)
 
-    async def send(self, text, reply_markup=None, chat_id=None, count_signal=True, kind="message", symbol=None):
+    async def send(self, text, reply_markup=None, chat_id=None, count_signal=True, kind="message"):
         url = f"https://api.telegram.org/bot{self.cfg['telegram']['bot_token']}/sendMessage"
-        if count_signal and symbol and symbol in set(self.current_mute_list()):
-            return None
-
         payload = {
             "chat_id": chat_id or self.cfg["telegram"]["chat_id"],
             "text": text,
@@ -1604,50 +1506,35 @@ class Bot:
         long_pct = ratio.get("long")
         short_pct = ratio.get("short")
 
+        vol1_text = self.metric_with_marks(r1.get("vol_pct"), [100, 1000, 10000])
+        vol4_text = self.metric_with_marks(r4.get("vol_pct"), [100, 1000, 10000])
+
+        px1_text = self.metric_with_marks(r1.get("price_pct"), [10, 25, 100])
+        px4_text = self.metric_with_marks(r4.get("price_pct"), [10, 25, 100])
+        px24_text = self.metric_with_marks(r24.get("price_pct"), [10, 25, 100])
+
+        oi5_text = self.metric_with_marks(oi.get("pct_5m"), [10, 25, 100])
+        oi4h_text = self.metric_with_marks(oi.get("pct_4h"), [10, 25, 100])
         acct_long_mark, acct_short_mark = self.sentiment_accounts(long_pct, short_pct)
+        funding_text = self.metric_with_marks(funding, [0.1, 0.5, 1], funding_mode=True)
 
         return (
             f"<b>🏷 Капа-рейтинг:</b> {rank_text}\n\n"
             f"<b>💵 Объём:</b>\n"
-            f"1ч: {self.fmt_usd(r1.get('vol_usd'))} | {self.metric_pct_text(r1.get('vol_pct'), (100.0, 1000.0, 10000.0))}\n"
-            f"4ч: {self.fmt_usd(r4.get('vol_usd'))} | {self.metric_pct_text(r4.get('vol_pct'), (100.0, 1000.0, 10000.0))}\n\n"
+            f"1ч: {self.fmt_usd(r1.get('vol_usd'))} | {vol1_text}\n"
+            f"4ч: {self.fmt_usd(r4.get('vol_usd'))} | {vol4_text}\n\n"
             f"<b>📈 Рост цены:</b>\n"
-            f"1ч: {self.metric_pct_text(r1.get('price_pct'), (10.0, 25.0, 100.0))}\n"
-            f"4ч: {self.metric_pct_text(r4.get('price_pct'), (10.0, 25.0, 100.0))}\n"
-            f"24ч: {self.metric_pct_text(r24.get('price_pct'), (10.0, 25.0, 100.0))}\n\n"
+            f"1ч: {px1_text}\n"
+            f"4ч: {px4_text}\n"
+            f"24ч: {px24_text}\n\n"
             f"<b>📊 Открытый интерес:</b> сейчас: {self.fmt_usd(oi.get('now'))}\n"
-            f"5м: {self.metric_pct_text(oi.get('pct_5m'), (10.0, 25.0, 100.0))}\n"
-            f"4ч: {self.metric_pct_text(oi.get('pct_4h'), (10.0, 25.0, 100.0))}\n\n"
+            f"5м: {oi5_text}\n"
+            f"4ч: {oi4h_text}\n\n"
             f"<b>👥 Аккаунты:</b>\n"
             f"{acct_long_mark} лонг: {self.fmt_pct(long_pct)} | {acct_short_mark} шорт: {self.fmt_pct(short_pct)}\n\n"
             f"<b>🩸 Фандинг:</b>\n"
-            f"{self.funding_text(funding)}"
+            f"{funding_text}"
         )
-
-    async def maybe_send_startup_checklist(self):
-        if self.startup_telegram_sent:
-            return
-        if not (self.health.get("binance_connected") and self.health.get("bybit_connected")):
-            return
-
-        checklist = (
-            f"<b>🤖 Mighty Tiger / {BUILD_VERSION}</b>\n<i>Ggrrr... Liquidity jungle hunter</i>\n\n"
-            "✅ Telegram OK\n"
-            "✅ Binance connected\n"
-            "✅ Bybit symbols loaded\n"
-            "✅ Bybit subscribe sent\n"
-            "✅ Bot ready for signals"
-        )
-        print("✅ START CHECKLIST", flush=True)
-        print("✅ Telegram OK", flush=True)
-        print("✅ Binance connected", flush=True)
-        print("✅ Bybit symbols loaded", flush=True)
-        print("✅ Bybit subscribe sent", flush=True)
-        print("✅ Bot ready for signals", flush=True)
-        try:
-            await self.send(checklist, reply_markup=self.keyboard)
-        finally:
-            self.startup_telegram_sent = True
 
     def trigger_log_line(self, symbol, snapshot, hyper=False):
         ex = snapshot["ex"]
@@ -1672,25 +1559,26 @@ class Bot:
         cascade_extra_usd = int(snapshot.get("cascade_extra_usd", 0) or 0)
         elapsed_text = snapshot.get("elapsed_text", "")
 
-        cycle_no = int(snapshot.get("cycle_no", 0) or 0)
-        cycle_suffix = f"   ({cycle_no})" if cycle_no > 0 else ""
-
         if monster:
-            top_line = f"💀 {symbol_safe} AGG - {self.fmt_usd(sum15)}{cycle_suffix}"
+            top_line = f"💀 {symbol_safe} AGG - {self.fmt_usd(sum15)}"
             header = f"MONSTER {self.signal_power_bar(10)}"
         elif super_hyper:
-            top_line = f"🚨 {symbol_safe} AGG - {self.fmt_usd(sum15)}{cycle_suffix}"
+            top_line = f"🚨 {symbol_safe} AGG - {self.fmt_usd(sum15)}"
             header = f"SUPER HYPER {self.signal_power_bar(9)}"
         elif hyper:
-            top_line = f"☄️ {symbol_safe} AGG - {self.fmt_usd(sum15)}{cycle_suffix}"
+            top_line = f"☄️ {symbol_safe} AGG - {self.fmt_usd(sum15)}"
             header = f"HYPER {self.signal_power_bar(8)}"
         elif level == 1:
-            top_line = f"🛑 {symbol_safe} {ex} - {self.fmt_usd(sum15)}{cycle_suffix}"
+            top_line = f"🛑 {symbol_safe} {ex} - {self.fmt_usd(sum15)}"
             header = f"LVL1 {self.signal_power_bar(1)}"
         else:
             icon = "🛑" if level <= 3 else ("🔥" if level <= 5 else "☄️")
-            top_line = f"{icon} {symbol_safe} AGG - {self.fmt_usd(sum15)}{cycle_suffix}"
+            top_line = f"{icon} {symbol_safe} AGG - {self.fmt_usd(sum15)}"
             header = f"LVL{level} {self.signal_power_bar(level)}"
+
+        cycle_no = int(snapshot.get("cycle_no", 0) or 0)
+        if cycle_no > 0:
+            top_line = f"{top_line}   ({cycle_no})"
 
         trigger_flow = f"💥 <b>{self.fmt_usd(sum15)} | {cnt} {self.events_word(cnt)}</b> 💥"
         by_sym, mode = self.resolve_bybit_symbol(symbol)
@@ -1734,7 +1622,6 @@ class Bot:
             return
 
         snap = dict(st["pending_snapshot"])
-        snap["cycle_no"] = int(st.get("cycle_no", 0) or 0)
         if snap.get("level") == 10:
             snap["monster"] = True
             if float(st.get("monster_base_sum15", 0.0) or 0.0) <= 0:
@@ -1796,7 +1683,9 @@ class Bot:
             now=now,
         )
         print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
-        message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=False), symbol=symbol)
+        message_id = ""
+        if not self.is_paused(symbol):
+            message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
         row["message_id"] = message_id or ""
 
         st["last_sent_level"] = st["pending_level"]
@@ -1844,7 +1733,6 @@ class Bot:
 
         snap = dict(snapshot)
         snap["level"] = 10
-        snap["cycle_no"] = int(st.get("cycle_no", 0) or 0)
         snap["monster"] = True
         snap["cascade_step"] = cascade_step
         snap["cascade_extra_usd"] = cascade_step * 100000
@@ -1885,7 +1773,9 @@ class Bot:
         )
 
         print(self.trigger_log_line(symbol, snap, hyper=False) + f" CASCADE +{cascade_step * 100}k", flush=True)
-        message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=False), symbol=symbol)
+        message_id = ""
+        if not self.is_paused(symbol):
+            message_id = await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
         row["message_id"] = message_id or ""
 
         st["cascade_step_sent"] = cascade_step
@@ -1919,6 +1809,7 @@ class Bot:
         return total, total >= thr
 
     async def handle(self, ex, symbol, side, usd):
+        symbol = str(symbol or "").upper()
         if self.is_blacklisted(symbol):
             return
 
@@ -1941,6 +1832,7 @@ class Bot:
         async with lock:
             st = self.symbol_state[state_key]
             if self.should_reset_range(st, now):
+                self.complete_cycle(symbol, now)
                 self.reset_range(state_key)
                 self.clear_symbol_flow_windows(symbol, side)
 
@@ -1991,7 +1883,7 @@ class Bot:
                     "sum15": first_sum,
                     "cnt": max(len(self.events_1m[local_key]), agg_cnt),
                     "level": first_level,
-                    "cycle_no": int(st.get("cycle_no", 0) or 0),
+                    "cycle_no": self.daily_cycle_no(symbol, now),
                 }
                 self.maybe_queue_level(state_key, entry_snapshot)
                 await self.maybe_send_pending(symbol, state_key)
@@ -2016,7 +1908,7 @@ class Bot:
                 "sum15": agg_sum15,
                 "cnt": agg_cnt,
                 "level": level,
-                "cycle_no": int(st.get("cycle_no", 0) or 0),
+                "cycle_no": self.daily_cycle_no(symbol, now),
             }
 
             if level < 2 and st.get("last_sent_level", 0) < 10:
@@ -2122,6 +2014,27 @@ class Bot:
                 print("Bybit error:", repr(e), flush=True)
                 await asyncio.sleep(5)
 
+    async def nightly_symbol_reload_loop(self):
+        while not self.stop_event.is_set():
+            now = self.msk_now()
+            target = now.replace(hour=3, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target = target + timedelta(days=1)
+            wait_sec = max(1.0, (target - now).total_seconds())
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=wait_sec)
+                continue
+            except asyncio.TimeoutError:
+                pass
+            try:
+                self.schedule_symbol_reload()
+                print("♻️ Daily symbol reload requested (03:00 MSK)", flush=True)
+                await self.send("♻️ Автоматическая перезагрузка тикеров с бирж (03:00 МСК)", reply_markup=self.keyboard, count_signal=False, kind="service")
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception as e:
+                print(f"Nightly reload error: {e!r}", flush=True)
+                await asyncio.sleep(5)
+
     async def run(self):
         print(f"✅ BOT STARTED / {BUILD_VERSION}", flush=True)
         await asyncio.gather(
@@ -2130,13 +2043,14 @@ class Bot:
             self.watchdog_loop(),
             self.telegram_control_loop(),
             self.pending_flush_loop(),
-            self.ticker_refresh_loop(),
+            self.nightly_symbol_reload_loop(),
         )
 
 
 async def main():
     ensure_single_instance()
     bot = Bot(load())
+    bot.pause_list = set(bot.load_runtime_mute_list())
 
     def handle_stop(*_args):
         bot.stop_event.set()

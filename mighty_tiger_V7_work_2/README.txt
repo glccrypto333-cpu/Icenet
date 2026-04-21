@@ -44,18 +44,20 @@ V7_work patch:
 
 
 
-V7_work.1:
-- BUILD_VERSION обновлён до V7_work.1
+V7_work.2:
+- BUILD_VERSION обновлён до V7_work.2
 - Таймер: ✅ = сценарий жив, 🆕 = новый сценарий, ❌ = anomaly flag lifecycle/reset
 - ❌ автоматически логируется в отдельный debug chat при заполненном telegram.debug_chat_id
 - В строке ссылок после тикера добавлен дополнительный отступ перед таймером
 
 
-V7_work.2
-- daily cycle counter in title
-- reload/restart menu
-- block/mute menus
-- top 4h for both exchanges
-- updated metric arrows/markers
-- OFF mode
-- daily symbol reload 03:00 MSK
+V7_work.2 patch notes:
+- Added daily cycle number per symbol in signal header: (1), (2), ...
+- Cycle counter is counted on top of normal reset logic and does not modify core lifecycle
+- Added TOP 4h for Binance and Bybit
+- Added OFF mode via very high thresholds
+- Added separate Reload config and Restart bot actions
+- Added Mute list control in Help (runtime only, cleared on restart)
+- Added daily automatic ticker reload / bot restart at 03:00 MSK
+- Updated metric marks with arrows and new exclamation thresholds
+- Updated Help text and control menus
