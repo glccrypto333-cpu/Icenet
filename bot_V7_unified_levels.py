@@ -49,8 +49,8 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V7_work.2"
-BUILD_DATE = "2026-04-21"
+BUILD_VERSION = "V7_work.3"
+BUILD_DATE = "2026-04-22"
 
 
 def load():
@@ -158,6 +158,7 @@ class Bot:
         self.market_events_30m = {"BINANCE": deque(), "BYBIT": deque()}
         self.market_events_4h = {"BINANCE": deque(), "BYBIT": deque()}
         self.signal_history = deque(maxlen=5000)
+        self.debug_history = deque(maxlen=50000)
         self.chat_history = deque(maxlen=10000)
         self.state_locks = {}
         self.control_state = {"awaiting_key": None}
@@ -213,6 +214,7 @@ class Bot:
         self.download_menu = {
             "keyboard": [
                 [{"text": "📤 Сигналы 24ч"}, {"text": "🗂 Чат 24ч"}],
+                [{"text": "🧠 Debug 24ч"}],
                 [{"text": "↩️ Назад"}],
             ],
             "resize_keyboard": True,
@@ -255,7 +257,7 @@ class Bot:
         }
         self.reload_menu = {
             "keyboard": [
-                [{"text": "🔄 Reload config"}, {"text": "♻️ Restart bot"}],
+                [{"text": "🔄 Reload config"}],
                 [{"text": "↩️ Назад"}],
             ],
             "resize_keyboard": True,
@@ -425,17 +427,6 @@ class Bot:
                     self.write_health()
                     os._exit(21)
 
-            try:
-                from datetime import datetime
-                dt_msk = datetime.now(ZoneInfo("Europe/Moscow"))
-                restart_key = dt_msk.strftime("%Y-%m-%d")
-                if dt_msk.hour == 3 and dt_msk.minute == 0 and self.last_daily_restart_key != restart_key:
-                    self.last_daily_restart_key = restart_key
-                    print("SCHEDULED RESTART 03:00 MSK", flush=True)
-                    os._exit(0)
-            except Exception as e:
-                print(f"Restart scheduler error: {e!r}", flush=True)
-
             await asyncio.sleep(5)
 
     def fmt_usd(self, v):
@@ -453,6 +444,56 @@ class Bot:
         if v is None:
             return "н/д"
         return f"{v:+.2f}%"
+
+    def fmt_num(self, v):
+        if v is None:
+            return "н/д"
+        try:
+            v = float(v)
+        except Exception:
+            return str(v)
+        if abs(v) >= 1_000_000_000:
+            return f"{v/1_000_000_000:.2f}B"
+        if abs(v) >= 1_000_000:
+            return f"{v/1_000_000:.2f}M"
+        if abs(v) >= 1_000:
+            return f"{v/1_000:.1f}K"
+        if float(v).is_integer():
+            return f"{int(v)}"
+        return f"{v:.2f}"
+
+    def log_debug(self, symbol, exchange, action, result="ok", reason="", **fields):
+        now = time.time()
+        row = {
+            "ts": now,
+            "ts_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now)),
+            "ts_msk": datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d %H:%M:%S"),
+            "symbol": symbol or "",
+            "exchange": exchange or "",
+            "action": action,
+            "result": result,
+            "reason": reason,
+        }
+        for k, v in fields.items():
+            row[k] = v
+        self.debug_history.append(row)
+
+    def export_debug_text(self):
+        now = time.time()
+        items = [row for row in list(self.debug_history) if now - row.get("ts", 0) <= 86400]
+        if not items:
+            return "Debug за 24ч\n\nПока пусто."
+        out = ["Debug за 24ч", ""]
+        base_order = ["ts_utc","ts_msk","symbol","exchange","action","result","reason"]
+        for i, row in enumerate(items[-50000:], 1):
+            parts = [f"{k}={row.get(k,'')}" for k in base_order]
+            for k, v in row.items():
+                if k in {"ts"} | set(base_order):
+                    continue
+                parts.append(f"{k}={v}")
+            out.append(f"{i}. " + " | ".join(parts))
+        return "\n".join(out)
+
 
     def level_marks(self, n):
         return " ".join(["❗️"] * max(0, int(n)))
@@ -765,6 +806,7 @@ class Bot:
         st["last_state_ts"] = 0.0
         st["anomaly_debug_ts"] = 0.0
         if symbol:
+            self.log_debug(symbol, "AGG", "reset", result="closed", reason="state_reset", last_sent_level=st.get("last_sent_level",0))
             self.note_cycle_reset(symbol)
 
 
@@ -969,8 +1011,8 @@ class Bot:
             "/limits — показать лимиты\n"
             "/top30_binance — топ 10 ликвидаций Binance за 30 минут\n"
             "/top30_bybit — топ 10 ликвидаций Bybit за 30 минут\n"
-            "/reload — открыть меню reload/restart\n"
-            "/export_chat_24h — выгрузить историю чата за 24ч\n"
+            "/reload — открыть меню reload config\n"
+            "/export_chat_24h — выгрузить историю чата за 24ч\n/export_debug_24h — выгрузить debug за 24ч\n"
             "/set section.key value — изменить лимит\n\n"
             "В Help:\n"
             "📛 Блок лист\n"
@@ -1203,14 +1245,14 @@ class Bot:
             return self.format_top4h("BYBIT"), self.top_menu
 
         if text in ("/reload", "🔄 Reload"):
-            return "<b>Reload</b>\n\nВыбери действие.", self.reload_menu
+            return "<b>Reload</b>\n\nДоступен только безопасный reload config.", self.reload_menu
         if text == "🔄 Reload config":
             self.cfg = load()
+            self.log_debug("", "CTRL", "reload_config", result="ok", reason="manual_reload")
             return "✅ Конфиг и overrides перечитаны.", self.keyboard
         if text == "♻️ Restart bot":
-            await self.send("♻️ Перезапуск бота...", reply_markup=self.keyboard, count_signal=False)
-            await asyncio.sleep(0.2)
-            os._exit(0)
+            self.log_debug("", "CTRL", "manual_restart", result="blocked", reason="restart_removed")
+            return "⛔ Restart bot отключён из сборки как небезопасная функция.", self.keyboard
 
         if text in ("❓ Help",):
             self.control_state["awaiting_key"] = None
@@ -1327,6 +1369,7 @@ class Bot:
                 body = await resp.text()
                 print("Telegram:", resp.status, body[:160], flush=True)
                 if resp.status == 200:
+                    self.log_debug("", "TG", "telegram_send", result="ok", reason=kind, chat_id=payload.get("chat_id"), count_signal=int(bool(count_signal)))
                     self.chat_history.append({
                         "ts": time.time(),
                         "time": time.strftime("%H:%M:%S", time.localtime(time.time())),
@@ -1343,6 +1386,8 @@ class Bot:
                         return json.loads(body).get("result", {}).get("message_id")
                     except Exception:
                         return None
+                else:
+                    self.log_debug("", "TG", "telegram_send", result=f"http_{resp.status}", reason=kind)
 
 
     async def send_document_text(self, filename, content, caption=None):
@@ -1363,6 +1408,7 @@ class Bot:
                 body = await resp.text()
                 print("Telegram document:", resp.status, body[:160], flush=True)
                 if resp.status == 200:
+                    self.log_debug("", "TG", "telegram_send", result="ok", reason=kind, chat_id=payload.get("chat_id"), count_signal=int(bool(count_signal)))
                     self.chat_history.append({
                         "ts": time.time(),
                         "time": time.strftime("%H:%M:%S", time.localtime(time.time())),
@@ -1532,9 +1578,9 @@ class Bot:
                     if current_usd is None:
                         current_usd = cur_4h
 
-                result = {"now": current_usd, "pct_1m": pct_1m, "pct_5m": pct_5m, "pct_4h": pct_4h}
+                result = {"now": current_contracts, "now_usd": current_usd, "pct_1m": pct_1m, "pct_5m": pct_5m, "pct_4h": pct_4h}
             except Exception:
-                result = {"now": None, "pct_1m": None, "pct_5m": None, "pct_4h": None}
+                result = {"now": None, "now_usd": None, "pct_1m": None, "pct_5m": None, "pct_4h": None}
 
         self._cache_set(("oi", symbol), result)
         return result
@@ -1641,7 +1687,7 @@ class Bot:
             f"1ч: {px1}\n"
             f"4ч: {px4}\n"
             f"24ч: {px24}\n\n"
-            f"<b>📊 Открытый интерес:</b> сейчас: {self.fmt_usd(oi.get('now'))}\n"
+            f"<b>📊 Открытый интерес:</b> сейчас: {self.fmt_num(oi.get('now'))} монет\n"
             f"5м: {oi5}\n"
             f"4ч: {oi4}\n\n"
             f"<b>👥 Аккаунты:</b>\n"
@@ -1747,6 +1793,7 @@ class Bot:
             st["pending_level"] = level
             st["pending_since_ts"] = snapshot["now"]
             st["pending_snapshot"] = snapshot
+            self.log_debug(state_key[1] if isinstance(state_key, tuple) else "", snapshot.get("ex",""), "pending_store", result="stored", reason="level_above_ceiling", level=level, flow=self.fmt_usd(snapshot.get("sum15")), cnt=snapshot.get("cnt"))
 
     async def maybe_send_pending(self, symbol, state_key):
         st = self.symbol_state[state_key]
@@ -1773,16 +1820,19 @@ class Bot:
         state_sig = self.build_state_signature(symbol, snap["ex"], snap["level"], snap["sum15"], snap["cnt"])
 
         if snap["level"] == 1 and signature == st.get("last_lvl1_signature", "") and now - st.get("last_lvl1_ts", 0.0) < 30:
+            self.log_debug(symbol, snap["ex"], "signature_skip", result="skipped", reason="duplicate_lvl1", level=snap["level"])
             st["pending_level"] = 0
             st["pending_since_ts"] = 0.0
             st["pending_snapshot"] = None
             return
         if signature == st.get("last_sent_signature", "") and now - st.get("last_sent_ts", 0.0) < 180:
+            self.log_debug(symbol, snap["ex"], "signature_skip", result="skipped", reason="same_signature_recent", level=snap["level"])
             st["pending_level"] = 0
             st["pending_since_ts"] = 0.0
             st["pending_snapshot"] = None
             return
         if self.should_skip_state_signal(st, state_sig, snap["level"], now):
+            self.log_debug(symbol, snap["ex"], "suppress", result="skipped", reason="state_signal_skip", level=snap["level"])
             st["pending_level"] = 0
             st["pending_since_ts"] = 0.0
             st["pending_snapshot"] = None
@@ -1805,7 +1855,7 @@ class Bot:
             "price_1h": self.fmt_pct(tf.get("1ч", {}).get("price_pct")),
             "price_4h": self.fmt_pct(tf.get("4ч", {}).get("price_pct")),
             "price_24h": self.fmt_pct(tf.get("24ч", {}).get("price_pct")),
-            "oi_now": self.fmt_usd(oi.get("now")),
+            "oi_now": f"{self.fmt_num(oi.get('now'))} монет" if oi.get("now") is not None else "н/д",
             "oi_5m": self.fmt_pct(oi.get("pct_5m")),
             "oi_4h": self.fmt_pct(oi.get("pct_4h")),
             "long_pct": self.fmt_pct(ratio.get("long")),
@@ -1823,6 +1873,7 @@ class Bot:
         print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
         message_id = None if self.is_muted(symbol) else await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
         row["message_id"] = message_id or ""
+        self.log_debug(symbol, snap["ex"], "pending_flush", result=("sent" if message_id else ("muted" if self.is_muted(symbol) else "no_message_id")), reason="flush_due", level=snap["level"], flow=self.fmt_usd(snap["sum15"]), cnt=snap["cnt"], tg_id=(message_id or ""), cycle=snap.get("cycle_num",""))
 
         st["last_sent_level"] = st["pending_level"]
         st["max_level_sent"] = max(st.get("max_level_sent", 0), st["last_sent_level"])
@@ -1893,7 +1944,7 @@ class Bot:
             "price_1h": self.fmt_pct(tf.get("1ч", {}).get("price_pct")),
             "price_4h": self.fmt_pct(tf.get("4ч", {}).get("price_pct")),
             "price_24h": self.fmt_pct(tf.get("24ч", {}).get("price_pct")),
-            "oi_now": self.fmt_usd(oi.get("now")),
+            "oi_now": f"{self.fmt_num(oi.get('now'))} монет" if oi.get("now") is not None else "н/д",
             "oi_5m": self.fmt_pct(oi.get("pct_5m")),
             "oi_4h": self.fmt_pct(oi.get("pct_4h")),
             "long_pct": self.fmt_pct(ratio.get("long")),
@@ -2059,6 +2110,7 @@ class Bot:
                     if cascade_step > int(st.get("cascade_step_sent", 0) or 0):
                         await self.maybe_send_cascade(symbol, state_key, snapshot)
                     elif usd >= float(self.cfg["filters"]["min_terminal_usd"]):
+                        self.log_debug(symbol, ex, "cascade_wait", result="skipped", reason="waiting_next_cascade_step", base=self.fmt_usd(base), flow=self.fmt_usd(agg_sum15), extra=self.fmt_usd(extra), next=f"+{next_step_usd//1000}k", left=self.fmt_usd(to_next))
                         print(
                             f"CASCADE_WAIT {symbol} base={self.fmt_usd(base)} flow={self.fmt_usd(agg_sum15)} "
                             f"extra={self.fmt_usd(extra)} next=+{next_step_usd//1000}k left={self.fmt_usd(to_next)}",

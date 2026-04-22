@@ -44,12 +44,12 @@ V7_work patch:
 
 
 
-V7_work.3:
-- BUILD_VERSION обновлён до V7_work.3
+V7_work.1:
+- BUILD_VERSION обновлён до V7_work.1
 - Таймер: ✅ = сценарий жив, 🆕 = новый сценарий, ❌ = anomaly flag lifecycle/reset
 - ❌ автоматически логируется в отдельный debug chat при заполненном telegram.debug_chat_id
 - В строке ссылок после тикера добавлен дополнительный отступ перед таймером
-V7_work.3:
+V7_work.2:
 - База сборки: строго mighty_tiger_V7_work_1
 - Ядро reset / lifecycle / MONSTER / CASCADE не менялось
 - Добавлен daily cycle counter по монете за сутки по Москве, показ в заголовке как (1)
@@ -64,8 +64,9 @@ V7_work.3:
 - Исправлены регрессии broken-сборок: run / telegram_api / metric_marks присутствуют
 
 
-Изменения V7_work.3:
-- удален auto-restart 03:00 MSK
-- удалена кнопка Restart bot
-- OI показывается в монетах
-- добавлен export debug_24h
+V7_work.3 patch notes:
+- Removed scheduled auto-restart at 03:00 MSK
+- Restart button disabled as unsafe
+- OI in metrics now displayed in coins, not USD
+- Added debug_24h export for decision log analysis
+- Reload menu keeps only safe config reload
