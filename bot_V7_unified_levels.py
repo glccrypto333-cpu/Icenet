@@ -49,8 +49,8 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_2_final"
-BUILD_DATE = "2026-04-22"
+BUILD_VERSION = "V3_3_BTC"
+BUILD_DATE = "2026-04-23"
 
 
 def load():
@@ -163,6 +163,15 @@ class Bot:
         self.control_state = {"awaiting_key": None}
         self.daily_cycle_counters = {}
         self.last_daily_restart_key = None
+        self.btc_alerts_enabled = bool(self.cfg.get("runtime", {}).get("btc_alerts_enabled", False))
+        self.btc_state = {
+            "last_alert_ts": 0.0,
+            "last_reason": "",
+            "last_exchange": "",
+            "last_amount": 0.0,
+        }
+        self.btc_events_15m = deque()
+        self.btc_symbols = {"BTCUSDT", "BTCPERP"}
         self.limit_button_map = {
             "1️⃣ Уровень 1": "signals.liq_level_1_usd",
             "2️⃣ Уровень 2": "signals.level_2_usd",
@@ -223,6 +232,7 @@ class Bot:
             "keyboard": [
                 [{"text": "🟢 Normal"}, {"text": "🟡 Fast test"}],
                 [{"text": "🟠 Power day"}, {"text": "⚫ OFF"}],
+                [{"text": "₿ BTC ON"}, {"text": "₿ BTC OFF"}],
                 [{"text": "↩️ Назад"}],
             ],
             "resize_keyboard": True,
@@ -885,7 +895,8 @@ class Bot:
             f"Биржи сигналов: {ex}\n"
             f"Терминал: {int(f.get('min_terminal_usd', 10000))}\n"
             f"Мин. событие: {min_event_effective}\n"
-            f"Top 10 минимум: {int(f.get('top30_min_usd', 3000))}"
+            f"Top 10 минимум: {int(f.get('top30_min_usd', 3000))}\n"
+            f"BTC alerts: {'ON' if self.btc_alerts_enabled else 'OFF'}"
         )
 
     def limit_prompt(self, dotted_key):
@@ -986,7 +997,11 @@ class Bot:
             "/set section.key value — изменить лимит\n\n"
             "В Help:\n"
             "📛 Блок лист\n"
-            "🔕 Mute лист"
+            "🔕 Mute лист\n"
+            "₿ BTC ON / ₿ BTC OFF\n"
+            "BTC alerts — отдельные уведомления по BTC от $1M single или agg 15m\n"
+            "Cooldown: 15 минут\n"
+            "Уровни Tiger для BTC не используются"
         )
 
     async def telegram_api(self, method, payload):
@@ -1073,6 +1088,7 @@ class Bot:
         out.append("[runtime]")
         mode = str(self.cfg.get("runtime", {}).get("signal_mode", "combat"))
         out.append(f"mode={mode}")
+        out.append(f"btc_alerts={'ON' if self.btc_alerts_enabled else 'OFF'}")
         out.append(f"blocklist={','.join(self.current_blocklist()) or '-'}")
         out.append(f"mutelist={','.join(self.load_runtime_mute()) or '-'}")
         return "\n".join(out)
@@ -1232,6 +1248,25 @@ class Bot:
 
         if text in ("⚙️ Режим", "/mode"):
             return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000\n⚫ OFF — уведомления выключены", self.mode_menu
+
+        if text == "₿ BTC ON":
+            self.btc_alerts_enabled = True
+            overrides = self.load_runtime_overrides()
+            overrides.setdefault("runtime", {})
+            overrides["runtime"]["btc_alerts_enabled"] = True
+            self.save_runtime_overrides(overrides)
+            self.cfg.setdefault("runtime", {})
+            self.cfg["runtime"]["btc_alerts_enabled"] = True
+            return "✅ BTC alerts включены", self.mode_menu
+        if text == "₿ BTC OFF":
+            self.btc_alerts_enabled = False
+            overrides = self.load_runtime_overrides()
+            overrides.setdefault("runtime", {})
+            overrides["runtime"]["btc_alerts_enabled"] = False
+            self.save_runtime_overrides(overrides)
+            self.cfg.setdefault("runtime", {})
+            self.cfg["runtime"]["btc_alerts_enabled"] = False
+            return "✅ BTC alerts выключены", self.mode_menu
         if text == "🟢 Normal":
             msg, kb = self.apply_signal_mode("combat")
             return "✅ Режим переключен: <b>Normal</b>\n\n" + msg, kb
@@ -1995,6 +2030,10 @@ class Bot:
         return total, total >= thr
 
     async def handle(self, ex, symbol, side, usd):
+        if self.is_btc_symbol(symbol):
+            await self.process_btc_alert(ex, symbol, side, usd)
+            return
+
         if self.is_blacklisted(symbol):
             return
 
@@ -2221,4 +2260,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

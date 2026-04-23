@@ -9,4 +9,3 @@ V3_2_final patch notes:
 - OI current value in message metrics now shows contracts / coins instead of USD
 - added Debug 24h export as a text document download
 - signal core, reset, lifecycle, pending/flush, MONSTER and CASCADE logic not intentionally changed
-
