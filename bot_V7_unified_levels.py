@@ -49,8 +49,15 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_2_final"
-BUILD_DATE = "2026-04-22"
+BUILD_VERSION = "V3_3_BTC"
+BUILD_DATE = "2026-04-24"
+
+
+BTC_SYMBOLS = {"BTCUSDT", "BTCPERP"}
+BTC_SINGLE_THRESHOLD = 1_000_000
+BTC_AGG_THRESHOLD = 1_000_000
+BTC_COOLDOWN_SEC = 900
+
 
 
 def load():
@@ -159,7 +166,13 @@ class Bot:
         self.market_events_4h = {"BINANCE": deque(), "BYBIT": deque()}
         self.signal_history = deque(maxlen=5000)
         self.chat_history = deque(maxlen=10000)
+        self.btc_debug_history = deque(maxlen=2000)
         self.state_locks = {}
+        self.btc_alerts_enabled = False
+        self.btc_last_alert_ts = 0.0
+        self.btc_last_alert_reason = None
+        self.btc_last_alert_exchange = None
+        self.btc_last_alert_amount = 0.0
         self.control_state = {"awaiting_key": None}
         self.daily_cycle_counters = {}
         self.last_daily_restart_key = None
@@ -223,6 +236,7 @@ class Bot:
             "keyboard": [
                 [{"text": "🟢 Normal"}, {"text": "🟡 Fast test"}],
                 [{"text": "🟠 Power day"}, {"text": "⚫ OFF"}],
+                [{"text": "₿ BTC ON"}, {"text": "₿ BTC OFF"}],
                 [{"text": "↩️ Назад"}],
             ],
             "resize_keyboard": True,
@@ -885,7 +899,8 @@ class Bot:
             f"Биржи сигналов: {ex}\n"
             f"Терминал: {int(f.get('min_terminal_usd', 10000))}\n"
             f"Мин. событие: {min_event_effective}\n"
-            f"Top 10 минимум: {int(f.get('top30_min_usd', 3000))}"
+            f"Top 10 минимум: {int(f.get('top30_min_usd', 3000))}\n"
+            f"BTC alerts: {'ON' if self.btc_alerts_enabled else 'OFF'}"
         )
 
     def limit_prompt(self, dotted_key):
@@ -972,6 +987,103 @@ class Bot:
         return "\n".join(out)
 
 
+
+    def is_btc_whitelisted(self, symbol):
+        return (symbol or "").upper() in BTC_SYMBOLS
+
+    def append_btc_debug(self, action, symbol="", exchange="", event_usd=0.0, agg_sum15=0.0, reason="", sent=False, cooldown_active=False):
+        self.btc_debug_history.append({
+            "ts": time.time(),
+            "time": time.strftime("%H:%M:%S", time.localtime(time.time())),
+            "action": action,
+            "symbol": symbol,
+            "exchange": exchange,
+            "event_usd": self.fmt_usd(event_usd) if event_usd else "$0",
+            "agg_sum15": self.fmt_usd(agg_sum15) if agg_sum15 else "$0",
+            "reason": reason,
+            "sent": "yes" if sent else "no",
+            "cooldown_active": "yes" if cooldown_active else "no",
+        })
+
+    def check_btc_trigger(self, ex, symbol, usd, agg_sum15):
+        if not self.is_btc_whitelisted(symbol):
+            return None
+        if ex == "BINANCE" and float(usd) >= BTC_SINGLE_THRESHOLD:
+            return "BINANCE SINGLE"
+        if ex == "BYBIT" and float(usd) >= BTC_SINGLE_THRESHOLD:
+            return "BYBIT SINGLE"
+        if float(agg_sum15) >= BTC_AGG_THRESHOLD:
+            return "AGG 15M"
+        return None
+
+    def msg_btc_alert(self, reason, ex, usd, agg_sum15, agg_cnt):
+        source = self.esc(reason)
+        ex_safe = self.esc(ex)
+        return (
+            f"<b>₿ BTC ALERT - {self.fmt_usd(max(float(usd), float(agg_sum15)))}</b>\n\n"
+            f"Источник: <b>{source}</b>\n\n"
+            f"💥 Событие: {self.fmt_usd(usd)}\n"
+            f"📊 Поток 15м: {self.fmt_usd(agg_sum15)} | {agg_cnt} событий\n"
+            f"🏦 Биржа: {ex_safe}\n\n"
+            f"⏱ Cooldown: 15m\n\n"
+            f"🔗 CG | BY | BTCUSDT"
+        )
+
+    async def process_btc_alert_hook(self, ex, symbol, side, usd, agg_sum15, agg_cnt):
+        if not self.btc_alerts_enabled:
+            if self.is_btc_whitelisted(symbol):
+                self.append_btc_debug("btc_alert_disabled", symbol, ex, usd, agg_sum15, "", False, False)
+            return
+
+        if not self.is_btc_whitelisted(symbol):
+            return
+
+        now = time.time()
+        cooldown_active = (now - float(self.btc_last_alert_ts or 0.0)) < BTC_COOLDOWN_SEC
+        if cooldown_active:
+            self.append_btc_debug("btc_alert_suppressed_cooldown", symbol, ex, usd, agg_sum15, "", False, True)
+            return
+
+        reason = self.check_btc_trigger(ex, symbol, usd, agg_sum15)
+        if not reason:
+            return
+
+        text = self.msg_btc_alert(reason, ex, usd, agg_sum15, agg_cnt)
+        message_id = await self.send(text, count_signal=False, kind="btc_alert")
+        self.btc_last_alert_ts = now
+        self.btc_last_alert_reason = reason
+        self.btc_last_alert_exchange = ex
+        self.btc_last_alert_amount = max(float(usd), float(agg_sum15))
+        action = {
+            "BINANCE SINGLE": "btc_alert_binance_single",
+            "BYBIT SINGLE": "btc_alert_bybit_single",
+            "AGG 15M": "btc_alert_agg_15m",
+        }.get(reason, "btc_alert")
+        self.append_btc_debug(action, symbol, ex, usd, agg_sum15, reason, True, False)
+        self.signal_history.append({
+            "ts": now,
+            "time": time.strftime("%H:%M:%S", time.localtime(now)),
+            "symbol": symbol,
+            "exchange": ex,
+            "label": "BTC_ALERT",
+            "event": self.fmt_usd(usd),
+            "flow": self.fmt_usd(agg_sum15),
+            "cnt": agg_cnt,
+            "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
+            "mapped": "BTC",
+            "message_id": message_id or "",
+            "rank": "",
+            "price_1h": "",
+            "price_4h": "",
+            "price_24h": "",
+            "oi_now": "",
+            "oi_5m": "",
+            "oi_4h": "",
+            "long_pct": "",
+            "short_pct": "",
+            "funding": "",
+        })
+
     def help_text(self):
         return (
             "<b>Команды управления</b>\n\n"
@@ -984,6 +1096,11 @@ class Bot:
             "/export_chat_24h — выгрузить историю чата за 24ч\n"
             "/export_debug_24h — выгрузить debug за 24ч\n"
             "/set section.key value — изменить лимит\n\n"
+            "BTC alerts:\n"
+            "₿ BTC ON / ₿ BTC OFF\n"
+            "threshold: $1M single / agg 15m\n"
+            "cooldown: 15m\n"
+            "уровни Tiger не используются\n\n"
             "В Help:\n"
             "📛 Блок лист\n"
             "🔕 Mute лист"
@@ -1075,6 +1192,20 @@ class Bot:
         out.append(f"mode={mode}")
         out.append(f"blocklist={','.join(self.current_blocklist()) or '-'}")
         out.append(f"mutelist={','.join(self.load_runtime_mute()) or '-'}")
+        out.append(f"btc_alerts={'ON' if self.btc_alerts_enabled else 'OFF'}")
+
+        out.append("")
+        out.append("[btc]")
+        btc_rows = [row for row in list(self.btc_debug_history) if now - row.get("ts", 0) <= 86400]
+        if not btc_rows:
+            out.append("empty")
+        else:
+            for i, row in enumerate(btc_rows[-2000:], 1):
+                out.append(
+                    f"{i}. {row.get('time','')} | {row.get('action','')} | {row.get('symbol','')} | {row.get('exchange','')} | "
+                    f"event={row.get('event_usd','')} | agg15={row.get('agg_sum15','')} | reason={row.get('reason','')} | "
+                    f"sent={row.get('sent','')} | cooldown={row.get('cooldown_active','')}"
+                )
         return "\n".join(out)
 
 
@@ -1244,6 +1375,12 @@ class Bot:
         if text == "⚫ OFF":
             _msg, kb = self.apply_signal_mode("off")
             return "✅ Режим переключен: <b>OFF</b>\n\nУведомления отключены, сбор данных продолжается.", kb
+        if text == "₿ BTC ON":
+            self.btc_alerts_enabled = True
+            return "✅ BTC alerts включены", self.mode_menu
+        if text == "₿ BTC OFF":
+            self.btc_alerts_enabled = False
+            return "✅ BTC alerts выключены", self.mode_menu
 
         if text in ("/limits", "📊 Лимиты"):
             return self.format_limits(), self.limit_menu
@@ -1995,15 +2132,7 @@ class Bot:
         return total, total >= thr
 
     async def handle(self, ex, symbol, side, usd):
-        if self.is_blacklisted(symbol):
-            return
-
         now = time.time()
-        if side == "short":
-            row_event = {"ts": now, "symbol": symbol, "usd": usd}
-            self.market_events_30m[ex].append(row_event)
-            self.market_events_4h[ex].append(dict(row_event))
-            self.prune_market_events(ex, now)
 
         allowed_exchanges = set(self.cfg.get("signals", {}).get("allowed_exchanges", ["BINANCE", "BYBIT"]))
         if ex not in allowed_exchanges:
@@ -2011,6 +2140,23 @@ class Bot:
 
         local_key = ("FLOW_LOCAL", ex, symbol, side)
         agg15_key = ("FLOW_AGG15", symbol, side)
+
+        self.events_15m[agg15_key].append((now, usd))
+        self.prune(self.events_15m[agg15_key], 900, now)
+        agg_sum15 = sum(v for _, v in self.events_15m[agg15_key])
+        agg_cnt = len(self.events_15m[agg15_key])
+
+        await self.process_btc_alert_hook(ex, symbol, side, usd, agg_sum15, agg_cnt)
+
+        if self.is_blacklisted(symbol):
+            return
+
+        if side == "short":
+            row_event = {"ts": now, "symbol": symbol, "usd": usd}
+            self.market_events_30m[ex].append(row_event)
+            self.market_events_4h[ex].append(dict(row_event))
+            self.prune_market_events(ex, now)
+
         state_key = ("STATE", symbol)
         lock = self.state_locks.setdefault(state_key, asyncio.Lock())
 
@@ -2021,14 +2167,10 @@ class Bot:
                 self.clear_symbol_flow_windows(symbol, side)
 
             self.events_1m[local_key].append((now, usd))
-            self.events_15m[agg15_key].append((now, usd))
 
             self.prune(self.events_1m[local_key], 60, now)
-            self.prune(self.events_15m[agg15_key], 900, now)
 
             local_sum1 = sum(v for _, v in self.events_1m[local_key])
-            agg_sum15 = sum(v for _, v in self.events_15m[agg15_key])
-            agg_cnt = len(self.events_15m[agg15_key])
 
             if side != "short":
                 return
@@ -2221,3 +2363,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
