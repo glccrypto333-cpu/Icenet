@@ -20,7 +20,7 @@ import aiohttp
 import websockets
 import yaml
 
-BINANCE_WS = "wss://fstream.binance.com/ws/!forceOrder@arr"
+BINANCE_WS = "wss://fstream.binance.com/market/ws/!forceOrder@arr"
 BYBIT_WS = "wss://stream.bybit.com/v5/public/linear"
 BYBIT_INSTRUMENTS_URL = "https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000"
 BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers"
@@ -49,7 +49,7 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_4_ICE_ISOLATED"
+BUILD_VERSION = "V3_4_1_BINANCE_WS_FIX"
 BUILD_DATE = "2026-04-24"
 
 
