@@ -49,13 +49,14 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_4_1_BINANCE_WS_FIX"
+BUILD_VERSION = "V3_4_2_BTC_ALWAYS_ON"
 BUILD_DATE = "2026-04-24"
 
 
 BTC_SYMBOLS = {"BTCUSDT", "BTCPERP"}
 BTC_THRESHOLD_1M = 1_000_000
 BTC_THRESHOLD_15M = 15_000_000
+BTC_THRESHOLD_30M = 30_000_000
 BTC_COOLDOWN_SEC = 900
 
 
@@ -176,7 +177,7 @@ class Bot:
         self.chat_history = deque(maxlen=10000)
         self.btc_debug_history = deque(maxlen=2000)
         self.state_locks = {}
-        self.btc_alerts_enabled = False
+        self.btc_alerts_enabled = True
         self.btc_alert_threshold = BTC_THRESHOLD_1M
         self.btc_last_alert_ts = 0.0
         self.btc_last_alert_reason = None
@@ -245,7 +246,7 @@ class Bot:
             "keyboard": [
                 [{"text": "🟢 Normal"}, {"text": "🟡 Fast test"}],
                 [{"text": "🟠 Power day"}, {"text": "⚫ OFF"}],
-                [{"text": "₿ BTC ON"}, {"text": "₿ BTC OFF"}],
+                [{"text": "₿ BTC"}],
                 [{"text": "↩️ Назад"}],
             ],
             "resize_keyboard": True,
@@ -254,7 +255,7 @@ class Bot:
         self.btc_menu = {
             "keyboard": [
                 [{"text": "₿ BTC 1M"}, {"text": "₿ BTC 15M"}],
-                [{"text": "₿ BTC OFF"}],
+                [{"text": "₿ BTC 30M"}],
                 [{"text": "↩️ Назад"}],
             ],
             "resize_keyboard": True,
@@ -1122,9 +1123,9 @@ class Bot:
             "/export_debug_24h — выгрузить debug за 24ч\n"
             "/set section.key value — изменить лимит\n\n"
             "BTC alerts:\n"
-            "₿ BTC ON → выбор порога: 1M / 15M\n"
-            "₿ BTC OFF\n"
-            "threshold: $1M или $15M single / agg 15m\n"
+            "₿ BTC → выбор порога: 1M / 15M / 30M\n"
+            "BTC layer всегда включён\n"
+            "threshold: $1M / $15M / $30M single или agg 15m\n"
             "работает в лонг и в шорт\n"
             "cooldown: 15m\n"
             "уровни Tiger не используются\n\n"
@@ -1390,7 +1391,7 @@ class Bot:
             return ("✅ Файл debug за 24ч отправлен." if ok else "❌ Не удалось отправить файл."), self.download_menu
 
         if text in ("⚙️ Режим", "/mode"):
-            return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000\n⚫ OFF — уведомления выключены\n\n₿ BTC ON — выбрать порог BTC alerts\n₿ BTC OFF — выключить BTC alerts", self.mode_menu
+            return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000\n⚫ OFF — обычные уведомления выключены\n\n₿ BTC — выбор порога BTC alerts\nBTC layer всегда включён: $1M / $15M / $30M", self.mode_menu
         if text == "🟢 Normal":
             msg, kb = self.apply_signal_mode("combat")
             return "✅ Режим переключен: <b>Normal</b>\n\n" + msg, kb
@@ -1403,8 +1404,8 @@ class Bot:
         if text == "⚫ OFF":
             _msg, kb = self.apply_signal_mode("off")
             return "✅ Режим переключен: <b>OFF</b>\n\nУведомления отключены, сбор данных продолжается.", kb
-        if text == "₿ BTC ON":
-            return "<b>BTC alerts</b>\n\nВыбери порог срабатывания:\n\n₿ BTC 1M — single или agg 15m от $1M\n₿ BTC 15M — single или agg 15m от $15M", self.btc_menu
+        if text in ("₿ BTC", "₿ BTC ON"):
+            return "<b>BTC alerts</b>\n\nBTC layer всегда включён. Выбери порог срабатывания:\n\n₿ BTC 1M — single или agg 15m от $1M\n₿ BTC 15M — single или agg 15m от $15M\n₿ BTC 30M — single или agg 15m от $30M", self.btc_menu
         if text == "₿ BTC 1M":
             self.btc_alerts_enabled = True
             self.btc_alert_threshold = BTC_THRESHOLD_1M
@@ -1413,9 +1414,13 @@ class Bot:
             self.btc_alerts_enabled = True
             self.btc_alert_threshold = BTC_THRESHOLD_15M
             return "✅ BTC alerts включены\nПорог: <b>$15M</b>", self.mode_menu
+        if text == "₿ BTC 30M":
+            self.btc_alerts_enabled = True
+            self.btc_alert_threshold = BTC_THRESHOLD_30M
+            return "✅ BTC alerts включены\nПорог: <b>$30M</b>", self.mode_menu
         if text == "₿ BTC OFF":
-            self.btc_alerts_enabled = False
-            return "✅ BTC alerts выключены", self.mode_menu
+            self.btc_alerts_enabled = True
+            return "₿ BTC layer всегда включён\nВыключение отключено. Регулируй порогом: <b>$1M / $15M / $30M</b>.", self.btc_menu
 
         if text in ("/limits", "📊 Лимиты"):
             return self.format_limits(), self.limit_menu
@@ -2170,6 +2175,9 @@ class Bot:
         # Queue ICE/BTC side-work without blocking the main liquidation pipeline.
         # Queue overflow drops ICE events, not market events.
         # process_btc_alert_hook is executed only inside ice_worker_loop.
+        # Hard isolation: ICE queue accepts BTC whitelist only.
+        if not self.is_btc_whitelisted(symbol):
+            return
         if not getattr(self, "ice_enabled", True):
             return
 
