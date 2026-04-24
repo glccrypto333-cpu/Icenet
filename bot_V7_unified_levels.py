@@ -49,13 +49,13 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_3_BTC"
+BUILD_VERSION = "V3_3_BTC_1"
 BUILD_DATE = "2026-04-24"
 
 
 BTC_SYMBOLS = {"BTCUSDT", "BTCPERP"}
-BTC_SINGLE_THRESHOLD = 1_000_000
-BTC_AGG_THRESHOLD = 1_000_000
+BTC_THRESHOLD_1M = 1_000_000
+BTC_THRESHOLD_15M = 15_000_000
 BTC_COOLDOWN_SEC = 900
 
 
@@ -169,6 +169,7 @@ class Bot:
         self.btc_debug_history = deque(maxlen=2000)
         self.state_locks = {}
         self.btc_alerts_enabled = False
+        self.btc_alert_threshold = BTC_THRESHOLD_1M
         self.btc_last_alert_ts = 0.0
         self.btc_last_alert_reason = None
         self.btc_last_alert_exchange = None
@@ -237,6 +238,15 @@ class Bot:
                 [{"text": "🟢 Normal"}, {"text": "🟡 Fast test"}],
                 [{"text": "🟠 Power day"}, {"text": "⚫ OFF"}],
                 [{"text": "₿ BTC ON"}, {"text": "₿ BTC OFF"}],
+                [{"text": "↩️ Назад"}],
+            ],
+            "resize_keyboard": True,
+            "is_persistent": True,
+        }
+        self.btc_menu = {
+            "keyboard": [
+                [{"text": "₿ BTC 1M"}, {"text": "₿ BTC 15M"}],
+                [{"text": "₿ BTC OFF"}],
                 [{"text": "↩️ Назад"}],
             ],
             "resize_keyboard": True,
@@ -901,6 +911,7 @@ class Bot:
             f"Мин. событие: {min_event_effective}\n"
             f"Top 10 минимум: {int(f.get('top30_min_usd', 3000))}\n"
             f"BTC alerts: {'ON' if self.btc_alerts_enabled else 'OFF'}"
+            f"{' / threshold ' + self.fmt_usd(self.btc_alert_threshold) if self.btc_alerts_enabled else ''}"
         )
 
     def limit_prompt(self, dotted_key):
@@ -1008,25 +1019,31 @@ class Bot:
     def check_btc_trigger(self, ex, symbol, usd, agg_sum15):
         if not self.is_btc_whitelisted(symbol):
             return None
-        if ex == "BINANCE" and float(usd) >= BTC_SINGLE_THRESHOLD:
+        threshold = float(getattr(self, "btc_alert_threshold", BTC_THRESHOLD_1M) or BTC_THRESHOLD_1M)
+        if ex == "BINANCE" and float(usd) >= threshold:
             return "BINANCE SINGLE"
-        if ex == "BYBIT" and float(usd) >= BTC_SINGLE_THRESHOLD:
+        if ex == "BYBIT" and float(usd) >= threshold:
             return "BYBIT SINGLE"
-        if float(agg_sum15) >= BTC_AGG_THRESHOLD:
+        if float(agg_sum15) >= threshold:
             return "AGG 15M"
         return None
 
-    def msg_btc_alert(self, reason, ex, usd, agg_sum15, agg_cnt):
+    def msg_btc_alert(self, reason, ex, side, usd, agg_sum15, agg_cnt):
         source = self.esc(reason)
         ex_safe = self.esc(ex)
+        side_norm = str(side or "").lower()
+        if side_norm == "long":
+            header = f"🟢💥💰₿ BTC ALERT - {self.fmt_usd(max(float(usd), float(agg_sum15)))}💰💥🟢"
+        else:
+            header = f"🔴💥💰₿ BTC ALERT - {self.fmt_usd(max(float(usd), float(agg_sum15)))}💰💥🔴"
         return (
-            f"<b>₿ BTC ALERT - {self.fmt_usd(max(float(usd), float(agg_sum15)))}</b>\n\n"
+            f"<b>{header}</b>\n\n"
             f"Источник: <b>{source}</b>\n\n"
             f"💥 Событие: {self.fmt_usd(usd)}\n"
             f"📊 Поток 15м: {self.fmt_usd(agg_sum15)} | {agg_cnt} событий\n"
             f"🏦 Биржа: {ex_safe}\n\n"
             f"⏱ Cooldown: 15m\n\n"
-            f"🔗 CG | BY | BTCUSDT"
+            f"{self.compact_links(ex, 'BTCUSDT')}"
         )
 
     async def process_btc_alert_hook(self, ex, symbol, side, usd, agg_sum15, agg_cnt):
@@ -1048,7 +1065,7 @@ class Bot:
         if not reason:
             return
 
-        text = self.msg_btc_alert(reason, ex, usd, agg_sum15, agg_cnt)
+        text = self.msg_btc_alert(reason, ex, side, usd, agg_sum15, agg_cnt)
         message_id = await self.send(text, count_signal=False, kind="btc_alert")
         self.btc_last_alert_ts = now
         self.btc_last_alert_reason = reason
@@ -1097,8 +1114,10 @@ class Bot:
             "/export_debug_24h — выгрузить debug за 24ч\n"
             "/set section.key value — изменить лимит\n\n"
             "BTC alerts:\n"
-            "₿ BTC ON / ₿ BTC OFF\n"
-            "threshold: $1M single / agg 15m\n"
+            "₿ BTC ON → выбор порога: 1M / 15M\n"
+            "₿ BTC OFF\n"
+            "threshold: $1M или $15M single / agg 15m\n"
+            "работает в лонг и в шорт\n"
             "cooldown: 15m\n"
             "уровни Tiger не используются\n\n"
             "В Help:\n"
@@ -1193,6 +1212,7 @@ class Bot:
         out.append(f"blocklist={','.join(self.current_blocklist()) or '-'}")
         out.append(f"mutelist={','.join(self.load_runtime_mute()) or '-'}")
         out.append(f"btc_alerts={'ON' if self.btc_alerts_enabled else 'OFF'}")
+        out.append(f"btc_threshold={self.fmt_usd(self.btc_alert_threshold)}")
 
         out.append("")
         out.append("[btc]")
@@ -1362,7 +1382,7 @@ class Bot:
             return ("✅ Файл debug за 24ч отправлен." if ok else "❌ Не удалось отправить файл."), self.download_menu
 
         if text in ("⚙️ Режим", "/mode"):
-            return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000\n⚫ OFF — уведомления выключены", self.mode_menu
+            return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000\n⚫ OFF — уведомления выключены\n\n₿ BTC ON — выбрать порог BTC alerts\n₿ BTC OFF — выключить BTC alerts", self.mode_menu
         if text == "🟢 Normal":
             msg, kb = self.apply_signal_mode("combat")
             return "✅ Режим переключен: <b>Normal</b>\n\n" + msg, kb
@@ -1376,8 +1396,15 @@ class Bot:
             _msg, kb = self.apply_signal_mode("off")
             return "✅ Режим переключен: <b>OFF</b>\n\nУведомления отключены, сбор данных продолжается.", kb
         if text == "₿ BTC ON":
+            return "<b>BTC alerts</b>\n\nВыбери порог срабатывания:\n\n₿ BTC 1M — single или agg 15m от $1M\n₿ BTC 15M — single или agg 15m от $15M", self.btc_menu
+        if text == "₿ BTC 1M":
             self.btc_alerts_enabled = True
-            return "✅ BTC alerts включены", self.mode_menu
+            self.btc_alert_threshold = BTC_THRESHOLD_1M
+            return "✅ BTC alerts включены\nПорог: <b>$1M</b>", self.mode_menu
+        if text == "₿ BTC 15M":
+            self.btc_alerts_enabled = True
+            self.btc_alert_threshold = BTC_THRESHOLD_15M
+            return "✅ BTC alerts включены\nПорог: <b>$15M</b>", self.mode_menu
         if text == "₿ BTC OFF":
             self.btc_alerts_enabled = False
             return "✅ BTC alerts выключены", self.mode_menu
