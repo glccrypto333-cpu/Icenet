@@ -49,7 +49,7 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_3_BTC_1"
+BUILD_VERSION = "V3_4_ICE_ISOLATED"
 BUILD_DATE = "2026-04-24"
 
 
@@ -164,6 +164,14 @@ class Bot:
         self.startup_telegram_sent = False
         self.market_events_30m = {"BINANCE": deque(), "BYBIT": deque()}
         self.market_events_4h = {"BINANCE": deque(), "BYBIT": deque()}
+
+        # ICE/BTC isolated worker state
+        # Main liquidation pipeline must never await ICE/BTC formatting/sending directly.
+        self.ice_enabled = True
+        self.ice_queue = asyncio.Queue(maxsize=5000)
+        self.ice_dropped = 0
+        self.ice_processed = 0
+        self.ice_errors = 0
         self.signal_history = deque(maxlen=5000)
         self.chat_history = deque(maxlen=10000)
         self.btc_debug_history = deque(maxlen=2000)
@@ -2158,6 +2166,31 @@ class Bot:
         thr = float(self.cfg["signals"].get("monster_3h_usd", 500000))
         return total, total >= thr
 
+    def enqueue_ice_event(self, ex, symbol, side, usd, agg_sum15, agg_cnt, ts):
+        # Queue ICE/BTC side-work without blocking the main liquidation pipeline.
+        # Queue overflow drops ICE events, not market events.
+        # process_btc_alert_hook is executed only inside ice_worker_loop.
+        if not getattr(self, "ice_enabled", True):
+            return
+
+        try:
+            self.ice_queue.put_nowait({
+                "ex": ex,
+                "symbol": symbol,
+                "side": side,
+                "usd": usd,
+                "agg_sum15": agg_sum15,
+                "agg_cnt": agg_cnt,
+                "ts": ts,
+            })
+        except asyncio.QueueFull:
+            self.ice_dropped += 1
+            print(f"ICE queue full: dropped={self.ice_dropped}", flush=True)
+        except Exception as e:
+            self.ice_errors += 1
+            print(f"ICE enqueue error: {e!r}", flush=True)
+
+
     async def handle(self, ex, symbol, side, usd):
         now = time.time()
 
@@ -2173,7 +2206,7 @@ class Bot:
         agg_sum15 = sum(v for _, v in self.events_15m[agg15_key])
         agg_cnt = len(self.events_15m[agg15_key])
 
-        await self.process_btc_alert_hook(ex, symbol, side, usd, agg_sum15, agg_cnt)
+        self.enqueue_ice_event(ex, symbol, side, usd, agg_sum15, agg_cnt, now)
 
         if self.is_blacklisted(symbol):
             return
@@ -2292,6 +2325,49 @@ class Bot:
 
             await self.maybe_send_pending(symbol, state_key)
 
+    async def ice_worker_loop(self):
+        # Dedicated ICE/BTC worker.
+        # If ICE/BTC breaks, this worker logs the error and keeps the bot alive.
+        print("✅ ICE worker started", flush=True)
+
+        while not self.stop_event.is_set():
+            try:
+                event = await self.ice_queue.get()
+
+                try:
+                    await asyncio.wait_for(
+                        self.process_btc_alert_hook(
+                            event["ex"],
+                            event["symbol"],
+                            event["side"],
+                            event["usd"],
+                            event["agg_sum15"],
+                            event["agg_cnt"],
+                        ),
+                        timeout=3.0,
+                    )
+                    self.ice_processed += 1
+
+                except asyncio.TimeoutError:
+                    self.ice_errors += 1
+                    print("ICE worker timeout", flush=True)
+
+                except Exception as e:
+                    self.ice_errors += 1
+                    print(f"ICE worker error: {e!r}", flush=True)
+
+                finally:
+                    try:
+                        self.ice_queue.task_done()
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                self.ice_errors += 1
+                print(f"ICE loop fatal-safe error: {e!r}", flush=True)
+                await asyncio.sleep(1)
+
+
     async def run_binance(self):
         while True:
             try:
@@ -2367,7 +2443,14 @@ class Bot:
 
     async def run(self):
         print(f"✅ BOT STARTED / {BUILD_VERSION}", flush=True)
-        await asyncio.gather(self.run_binance(), self.run_bybit(), self.watchdog_loop(), self.telegram_control_loop(), self.pending_flush_loop())
+        await asyncio.gather(
+            self.run_binance(),
+            self.run_bybit(),
+            self.watchdog_loop(),
+            self.telegram_control_loop(),
+            self.pending_flush_loop(),
+            self.ice_worker_loop(),
+        )
 
 
 async def main():
