@@ -1461,8 +1461,8 @@ class Bot:
                 caption="<b>Debug за 24ч</b>",
             )
             if ok_signals and ok_chat and ok_debug:
-                return "✅ Все 3 файла за 24ч отправлены.", self.main_menu
-            return "⚠️ Часть файлов не отправилась. Проверь Telegram / логи.", self.main_menu
+                return "✅ Все 3 файла за 24ч отправлены.", self.download_menu
+            return "⚠️ Часть файлов не отправилась. Проверь Telegram / логи.", self.download_menu
         if text in ("/export_24h", "📤 Сигналы 24ч"):
             payload = self.export_signals_text()
             fname = f"signals_24h_{time.strftime('%Y%m%d_%H%M%S')}.txt"
