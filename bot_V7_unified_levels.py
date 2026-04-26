@@ -49,8 +49,8 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_4_4_SAFE_AUDIT"
-BUILD_DATE = "2026-04-24"
+BUILD_VERSION = "V3_5_STATE_AUDIT"
+BUILD_DATE = "2026-04-26"
 
 
 BTC_SYMBOLS = {"BTCUSDT", "BTCPERP"}
@@ -147,6 +147,10 @@ class Bot:
             "monster_active": False,
             "monster_base_sum15": 0.0,
             "cascade_step_sent": 0,
+            "cycle_id": 0,
+            "mode_at_cycle_start": "",
+            "reset_reason": "",
+            "last_reset_ts": 0.0,
             "last_sent_signature": "",
             "last_sent_ts": 0.0,
             "last_lvl1_signature": "",
@@ -176,6 +180,9 @@ class Bot:
         self.signal_history = deque(maxlen=5000)
         self.chat_history = deque(maxlen=10000)
         self.btc_debug_history = deque(maxlen=2000)
+        self.state_transition_history = deque(maxlen=5000)
+        self.state_reset_history = deque(maxlen=1000)
+        self.next_state_cycle_id = 0
         self.state_locks = {}
         self.btc_alerts_enabled = True
         self.btc_alert_threshold = BTC_THRESHOLD_1M
@@ -365,6 +372,52 @@ class Bot:
         if entry["current"] > 0:
             entry["completed"] = max(int(entry["completed"]), int(entry["current"]))
             entry["current"] = 0
+
+    def current_signal_mode(self):
+        return str(self.cfg.get("runtime", {}).get("signal_mode", "combat"))
+
+    def allocate_state_cycle_id(self):
+        self.next_state_cycle_id += 1
+        return int(self.next_state_cycle_id)
+
+    def append_state_transition(self, symbol, state_key, event, st=None, extra=None):
+        now = time.time()
+        st = st or self.symbol_state[state_key]
+        row = {
+            "ts": now,
+            "time": time.strftime("%H:%M:%S", time.localtime(now)),
+            "symbol": symbol,
+            "cycle_id": int(st.get("cycle_id", 0) or 0),
+            "mode_at_cycle_start": st.get("mode_at_cycle_start", ""),
+            "event": event,
+            "last_level": st.get("last_sent_level", 0),
+            "max_level": st.get("max_level_sent", 0),
+            "monster_base": self.fmt_usd(st.get("monster_base_sum15", 0.0) or 0.0),
+            "cascade_step": int(st.get("cascade_step_sent", 0) or 0),
+            "age_sec": int(max(0.0, now - float(st.get("last_level_change_ts", 0.0) or now))),
+        }
+        if extra:
+            row.update(extra)
+        self.state_transition_history.append(row)
+
+    def append_state_reset(self, symbol, state_key, reason, st=None):
+        now = time.time()
+        st = st or self.symbol_state[state_key]
+        row = {
+            "ts": now,
+            "time": time.strftime("%H:%M:%S", time.localtime(now)),
+            "symbol": symbol,
+            "cycle_id": int(st.get("cycle_id", 0) or 0),
+            "reason": reason,
+            "mode_at_cycle_start": st.get("mode_at_cycle_start", ""),
+            "last_level": st.get("last_sent_level", 0),
+            "max_level": st.get("max_level_sent", 0),
+            "monster_base": self.fmt_usd(st.get("monster_base_sum15", 0.0) or 0.0),
+            "cascade_step": int(st.get("cascade_step_sent", 0) or 0),
+            "age_sec": int(max(0.0, now - float(st.get("last_level_change_ts", 0.0) or now))),
+        }
+        self.state_reset_history.append(row)
+        self.append_state_transition(symbol, state_key, f"RESET:{reason}", st=st)
 
     def load_runtime_mute(self):
         if not MUTE_RUNTIME_FILE.exists():
@@ -793,9 +846,11 @@ class Bot:
             self.events_15m[agg_key].clear()
 
 
-    def reset_range(self, state_key):
+    def reset_range(self, state_key, reason="timeout_15m"):
         symbol = state_key[1] if isinstance(state_key, tuple) and len(state_key) > 1 else None
         st = self.symbol_state[state_key]
+        if symbol and st.get("range_active"):
+            self.append_state_reset(symbol, state_key, reason, st=st)
         st["range_active"] = False
         st["range_start_ts"] = 0.0
         st["range_exchange"] = ""
@@ -810,6 +865,8 @@ class Bot:
         st["monster_active"] = False
         st["monster_base_sum15"] = 0.0
         st["cascade_step_sent"] = 0
+        st["reset_reason"] = reason
+        st["last_reset_ts"] = time.time()
         st["last_sent_signature"] = ""
         st["last_sent_ts"] = 0.0
         st["last_lvl1_signature"] = ""
@@ -824,6 +881,10 @@ class Bot:
     def open_range(self, state_key, ex, now):
         symbol = state_key[1] if isinstance(state_key, tuple) and len(state_key) > 1 else None
         st = self.symbol_state[state_key]
+        st["cycle_id"] = self.allocate_state_cycle_id()
+        st["mode_at_cycle_start"] = self.current_signal_mode()
+        st["reset_reason"] = ""
+        self.append_state_transition(symbol or "", state_key, "OPEN_RANGE", st=st, extra={"exchange": ex})
         st["range_active"] = True
         st["range_start_ts"] = now
         st["range_exchange"] = ex
@@ -1172,7 +1233,7 @@ class Bot:
                 "event": self.fmt_usd(usd),
                 "flow": self.fmt_usd(agg_sum15),
                 "cnt": agg_cnt,
-                "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
+                "mode": self.current_signal_mode(),
                 "mapped": "BTC",
                 "message_id": message_id or "",
                 "rank": "",
@@ -1239,14 +1300,17 @@ class Bot:
                 f"mode={row.get('mode','')} | bybit={row.get('mapped','')} | tg={row.get('message_id','')} | "
                 f"rank={row.get('rank','')} | p1h={row.get('price_1h','')} | p4h={row.get('price_4h','')} | "
                 f"p24h={row.get('price_24h','')} | oi5m={row.get('oi_5m','')} | oi4h={row.get('oi_4h','')} | "
-                f"long={row.get('long_pct','')} | short={row.get('short_pct','')} | funding={row.get('funding','')}"
+                f"long={row.get('long_pct','')} | short={row.get('short_pct','')} | funding={row.get('funding','')} | "
+                f"cycle_id={row.get('cycle_id','')} | cycle_mode={row.get('mode_at_cycle_start','')} | "
+                f"monster_base={row.get('monster_base','')} | cascade_step={row.get('cascade_step','')} | "
+                f"last_meaningful_age_sec={row.get('last_meaningful_age_sec','')}"
             )
         return "\n".join(out)
 
     def export_signals_csv_text(self):
         now = time.time()
         items = [row for row in list(self.signal_history) if now - row.get('ts', 0) <= 86400]
-        cols = ['time','symbol','exchange','label','event','flow','cnt','mode','mapped','message_id','rank','price_1h','price_4h','price_24h','oi_now','oi_5m','oi_4h','long_pct','short_pct','funding']
+        cols = ['time','symbol','exchange','label','event','flow','cnt','mode','mapped','message_id','rank','price_1h','price_4h','price_24h','oi_now','oi_5m','oi_4h','long_pct','short_pct','funding','cycle_id','mode_at_cycle_start','monster_base','cascade_step','last_meaningful_age_sec']
         sio = io.StringIO()
         w = csv.DictWriter(sio, fieldnames=cols)
         w.writeheader()
@@ -1290,6 +1354,24 @@ class Bot:
                     f"{i}. {row.get('time','')} | {row.get('exchange','')} | {row.get('symbol','')} | {row.get('side','')} | "
                     f"raw_sum15={row.get('raw_sum15','')} | agg_sum15={row.get('agg_sum15','')} | diff={row.get('diff','')} | cnt={row.get('cnt','')}"
                 )
+        out.append("")
+        out.append("[state_reset_summary]")
+        resets = [x for x in list(self.state_reset_history) if now - x.get("ts", 0) <= 86400]
+        if not resets:
+            out.append("empty")
+        else:
+            by_reason = {}
+            for row in resets:
+                by_reason[row.get("reason", "")] = by_reason.get(row.get("reason", ""), 0) + 1
+            out.append("total=" + str(len(resets)) + " | " + " | ".join(f"{k}={v}" for k, v in sorted(by_reason.items())))
+            for i, row in enumerate(resets[-100:], 1):
+                out.append(
+                    f"{i}. {row.get('time','')} | {row.get('symbol','')} | cycle_id={row.get('cycle_id','')} | "
+                    f"reason={row.get('reason','')} | cycle_mode={row.get('mode_at_cycle_start','')} | "
+                    f"last_level={row.get('last_level','')} | max_level={row.get('max_level','')} | "
+                    f"monster_base={row.get('monster_base','')} | cascade_step={row.get('cascade_step','')} | "
+                    f"age_sec={row.get('age_sec','')}"
+                )
         return "\n".join(out)
 
 
@@ -1311,7 +1393,9 @@ class Bot:
                     f"rank={row.get('rank','')} | p1h={row.get('price_1h','')} | p4h={row.get('price_4h','')} | "
                     f"p24h={row.get('price_24h','')} | oi_now={row.get('oi_now','')} | oi5m={row.get('oi_5m','')} | "
                     f"oi4h={row.get('oi_4h','')} | long={row.get('long_pct','')} | short={row.get('short_pct','')} | "
-                    f"funding={row.get('funding','')}"
+                    f"funding={row.get('funding','')} | cycle_id={row.get('cycle_id','')} | "
+                    f"cycle_mode={row.get('mode_at_cycle_start','')} | monster_base={row.get('monster_base','')} | "
+                    f"cascade_step={row.get('cascade_step','')} | last_meaningful_age_sec={row.get('last_meaningful_age_sec','')}"
                 )
 
         out.append("")
@@ -1336,6 +1420,36 @@ class Bot:
         out.append(f"bybit_active_symbols={len(self.audit_active_symbols.get('BYBIT', set()))}")
         out.append(f"bybit_subscribed_symbols={self.audit_bybit_subscribed_symbols}")
         out.append(f"bybit_rollback_count={self.audit_bybit_rollback_count}")
+
+        out.append("")
+        out.append("[state_transitions]")
+        transitions = [x for x in list(self.state_transition_history) if now - x.get("ts", 0) <= 86400]
+        if not transitions:
+            out.append("empty")
+        else:
+            for i, row in enumerate(transitions[-500:], 1):
+                out.append(
+                    f"{i}. {row.get('time','')} | {row.get('symbol','')} | cycle_id={row.get('cycle_id','')} | "
+                    f"event={row.get('event','')} | cycle_mode={row.get('mode_at_cycle_start','')} | "
+                    f"last_level={row.get('last_level','')} | max_level={row.get('max_level','')} | "
+                    f"monster_base={row.get('monster_base','')} | cascade_step={row.get('cascade_step','')} | "
+                    f"age_sec={row.get('age_sec','')} | flow={row.get('flow','')} | cnt={row.get('cnt','')}"
+                )
+
+        out.append("")
+        out.append("[state_resets]")
+        resets = [x for x in list(self.state_reset_history) if now - x.get("ts", 0) <= 86400]
+        if not resets:
+            out.append("empty")
+        else:
+            for i, row in enumerate(resets[-300:], 1):
+                out.append(
+                    f"{i}. {row.get('time','')} | {row.get('symbol','')} | cycle_id={row.get('cycle_id','')} | "
+                    f"reason={row.get('reason','')} | cycle_mode={row.get('mode_at_cycle_start','')} | "
+                    f"last_level={row.get('last_level','')} | max_level={row.get('max_level','')} | "
+                    f"monster_base={row.get('monster_base','')} | cascade_step={row.get('cascade_step','')} | "
+                    f"age_sec={row.get('age_sec','')}"
+                )
 
         out.append("")
         out.append("[btc]")
@@ -2154,7 +2268,7 @@ class Bot:
             "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
             "symbol": symbol, "exchange": snap["ex"], "label": ("MONSTER" if snap['level']==10 else ("SUPER HYPER" if snap['level']==9 else ("HYPER" if snap['level']==8 else f"LVL{snap['level']}"))),
             "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"],
-            "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
+            "mode": self.current_signal_mode(),
             "mapped": by_sym or "BY n/a",
             "message_id": "",
             "rank": stats.get("rank",""),
@@ -2167,6 +2281,11 @@ class Bot:
             "long_pct": self.fmt_pct(ratio.get("long")),
             "short_pct": self.fmt_pct(ratio.get("short")),
             "funding": self.fmt_pct(stats.get("funding")),
+            "cycle_id": int(st.get("cycle_id", 0) or 0),
+            "mode_at_cycle_start": st.get("mode_at_cycle_start", ""),
+            "monster_base": self.fmt_usd(st.get("monster_base_sum15", 0.0) or 0.0),
+            "cascade_step": int(st.get("cascade_step_sent", 0) or 0),
+            "last_meaningful_age_sec": int(max(0.0, now - float(st.get("last_level_change_ts", 0.0) or now))),
         }
         self.signal_history.append(row)
 
@@ -2185,6 +2304,17 @@ class Bot:
         st["last_level_change_ts"] = now
         st["last_sent_signature"] = signature
         st["last_sent_ts"] = now
+        self.append_state_transition(
+            symbol,
+            state_key,
+            row.get("label", ""),
+            st=st,
+            extra={
+                "flow": row.get("flow", ""),
+                "cnt": row.get("cnt", ""),
+                "message_id": row.get("message_id", ""),
+            },
+        )
         self.mark_state_signal_sent(st, state_sig, now)
         if snap["level"] == 10:
             st["monster_active"] = True
@@ -2242,7 +2372,7 @@ class Bot:
             "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
             "symbol": symbol, "exchange": snap["ex"], "label": f"MONSTER +{cascade_step * 100}k",
             "event": self.fmt_usd(snap["trigger_usd"]), "flow": self.fmt_usd(snap["sum15"]), "cnt": snap["cnt"],
-            "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
+            "mode": self.current_signal_mode(),
             "mapped": by_sym or "BY n/a",
             "message_id": "",
             "rank": stats.get("rank",""),
@@ -2255,6 +2385,11 @@ class Bot:
             "long_pct": self.fmt_pct(ratio.get("long")),
             "short_pct": self.fmt_pct(ratio.get("short")),
             "funding": self.fmt_pct(stats.get("funding")),
+            "cycle_id": int(st.get("cycle_id", 0) or 0),
+            "mode_at_cycle_start": st.get("mode_at_cycle_start", ""),
+            "monster_base": self.fmt_usd(st.get("monster_base_sum15", 0.0) or 0.0),
+            "cascade_step": int(cascade_step),
+            "last_meaningful_age_sec": int(max(0.0, now - float(st.get("last_level_change_ts", 0.0) or now))),
         }
         self.signal_history.append(row)
 
@@ -2273,6 +2408,17 @@ class Bot:
         st["last_level_change_ts"] = now
         st["last_sent_signature"] = signature
         st["last_sent_ts"] = now
+        self.append_state_transition(
+            symbol,
+            state_key,
+            f"MONSTER +{cascade_step * 100}k",
+            st=st,
+            extra={
+                "flow": row.get("flow", ""),
+                "cnt": row.get("cnt", ""),
+                "message_id": row.get("message_id", ""),
+            },
+        )
     async def pending_flush_loop(self):
         while not self.stop_event.is_set():
             try:
@@ -2374,7 +2520,7 @@ class Bot:
         async with lock:
             st = self.symbol_state[state_key]
             if self.should_reset_range(st, now):
-                self.reset_range(state_key)
+                self.reset_range(state_key, reason="timeout_15m")
                 self.clear_symbol_flow_windows(symbol, side)
 
             self.events_1m[local_key].append((now, usd))
