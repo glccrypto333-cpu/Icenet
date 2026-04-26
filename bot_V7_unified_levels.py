@@ -49,7 +49,7 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_4_2_BTC_ALWAYS_ON"
+BUILD_VERSION = "V3_4_3_BTC_BUCKETS_DOWNLOAD_ALL"
 BUILD_DATE = "2026-04-24"
 
 
@@ -179,6 +179,7 @@ class Bot:
         self.state_locks = {}
         self.btc_alerts_enabled = True
         self.btc_alert_threshold = BTC_THRESHOLD_1M
+        self.btc_cooldowns = {}
         self.btc_last_alert_ts = 0.0
         self.btc_last_alert_reason = None
         self.btc_last_alert_exchange = None
@@ -919,8 +920,7 @@ class Bot:
             f"Терминал: {int(f.get('min_terminal_usd', 10000))}\n"
             f"Мин. событие: {min_event_effective}\n"
             f"Top 10 минимум: {int(f.get('top30_min_usd', 3000))}\n"
-            f"BTC alerts: {'ON' if self.btc_alerts_enabled else 'OFF'}"
-            f"{' / threshold ' + self.fmt_usd(self.btc_alert_threshold) if self.btc_alerts_enabled else ''}"
+            "BTC alerts: ON / buckets $1M, $15M, $30M"
         )
 
     def limit_prompt(self, dotted_key):
@@ -1025,34 +1025,86 @@ class Bot:
             "cooldown_active": "yes" if cooldown_active else "no",
         })
 
-    def check_btc_trigger(self, ex, symbol, usd, agg_sum15):
-        if not self.is_btc_whitelisted(symbol):
-            return None
-        threshold = float(getattr(self, "btc_alert_threshold", BTC_THRESHOLD_1M) or BTC_THRESHOLD_1M)
-        if ex == "BINANCE" and float(usd) >= threshold:
-            return "BINANCE SINGLE"
-        if ex == "BYBIT" and float(usd) >= threshold:
-            return "BYBIT SINGLE"
-        if float(agg_sum15) >= threshold:
-            return "AGG 15M"
-        return None
+    def btc_threshold_buckets(self):
+        return [
+            ("1M", BTC_THRESHOLD_1M),
+            ("15M", BTC_THRESHOLD_15M),
+            ("30M", BTC_THRESHOLD_30M),
+        ]
 
-    def msg_btc_alert(self, reason, ex, side, usd, agg_sum15, agg_cnt):
+    def btc_side_key(self, side):
+        return "LONG" if str(side or "").lower() == "long" else "SHORT"
+
+    def btc_24h_counts(self):
+        now = time.time()
+        long_count = 0
+        short_count = 0
+        for item in self.signal_history:
+            try:
+                if float(item.get("ts", 0.0)) < now - 86400:
+                    continue
+                if item.get("symbol") != "BTCUSDT":
+                    continue
+                if str(item.get("label", "")) != "BTC_ALERT":
+                    continue
+                side_key = str(item.get("side", "")).upper()
+                if side_key == "LONG":
+                    long_count += 1
+                elif side_key == "SHORT":
+                    short_count += 1
+            except Exception:
+                continue
+        return long_count, short_count
+
+    def check_btc_triggers(self, ex, symbol, usd, agg_sum15):
+        if not self.is_btc_whitelisted(symbol):
+            return []
+
+        triggers = []
+        event_usd = float(usd or 0.0)
+        flow_usd = float(agg_sum15 or 0.0)
+
+        for bucket, threshold in self.btc_threshold_buckets():
+            threshold = float(threshold)
+            if ex == "BINANCE" and event_usd >= threshold:
+                reason = f"BINANCE SINGLE {bucket}"
+            elif ex == "BYBIT" and event_usd >= threshold:
+                reason = f"BYBIT SINGLE {bucket}"
+            elif flow_usd >= threshold:
+                reason = f"AGG 15M {bucket}"
+            else:
+                continue
+            triggers.append((bucket, threshold, reason))
+
+        return triggers
+
+    def msg_btc_alert(self, reason, ex, side, usd, agg_sum15, agg_cnt, bucket):
         source = self.esc(reason)
         ex_safe = self.esc(ex)
         side_norm = str(side or "").lower()
-        if side_norm == "long":
-            header = f"🟢💥💰₿ BTC ALERT - {self.fmt_usd(max(float(usd), float(agg_sum15)))}💰💥🟢"
+        side_key = self.btc_side_key(side)
+        long_count, short_count = self.btc_24h_counts()
+
+        # Count the current message before it is appended to signal_history.
+        if side_key == "LONG":
+            long_count += 1
         else:
-            header = f"🔴💥💰₿ BTC ALERT - {self.fmt_usd(max(float(usd), float(agg_sum15)))}💰💥🔴"
+            short_count += 1
+
+        amount = max(float(usd), float(agg_sum15))
+        if side_norm == "long":
+            header = f"🟢💥💰₿ BTC ALERT {bucket} - {self.fmt_usd(amount)}💰💥🟢"
+        else:
+            header = f"🔴💥💰₿ BTC ALERT {bucket} - {self.fmt_usd(amount)}💰💥🔴"
+
         return (
             f"<b>{header}</b>\n\n"
             f"Источник: <b>{source}</b>\n\n"
             f"💥 Событие: {self.fmt_usd(usd)}\n"
             f"📊 Поток 15м: {self.fmt_usd(agg_sum15)} | {agg_cnt} событий\n"
-            f"🏦 Биржа: {ex_safe}\n\n"
-            f"⏱ Cooldown: 15m\n\n"
-            f"{self.compact_links(ex, 'BTCUSDT')}"
+            f"🏦 Биржа: {ex_safe}\n"
+            f"⏱ Задержка: 15m / {bucket} / {side_key}\n\n"
+            f"{self.compact_links(ex, 'BTCUSDT')}     🆕     🟢{long_count}🔄 🔴{short_count}🔄"
         )
 
     async def process_btc_alert_hook(self, ex, symbol, side, usd, agg_sum15, agg_cnt):
@@ -1065,50 +1117,70 @@ class Bot:
             return
 
         now = time.time()
-        cooldown_active = (now - float(self.btc_last_alert_ts or 0.0)) < BTC_COOLDOWN_SEC
-        if cooldown_active:
-            self.append_btc_debug("btc_alert_suppressed_cooldown", symbol, ex, usd, agg_sum15, "", False, True)
+        side_key = self.btc_side_key(side)
+        triggers = self.check_btc_triggers(ex, symbol, usd, agg_sum15)
+        if not triggers:
             return
 
-        reason = self.check_btc_trigger(ex, symbol, usd, agg_sum15)
-        if not reason:
-            return
+        for bucket, _threshold, reason in triggers:
+            cooldown_key = f"BTC:{side_key}:{bucket}"
+            last_ts = float(self.btc_cooldowns.get(cooldown_key, 0.0) or 0.0)
+            cooldown_active = (now - last_ts) < BTC_COOLDOWN_SEC
 
-        text = self.msg_btc_alert(reason, ex, side, usd, agg_sum15, agg_cnt)
-        message_id = await self.send(text, count_signal=False, kind="btc_alert")
-        self.btc_last_alert_ts = now
-        self.btc_last_alert_reason = reason
-        self.btc_last_alert_exchange = ex
-        self.btc_last_alert_amount = max(float(usd), float(agg_sum15))
-        action = {
-            "BINANCE SINGLE": "btc_alert_binance_single",
-            "BYBIT SINGLE": "btc_alert_bybit_single",
-            "AGG 15M": "btc_alert_agg_15m",
-        }.get(reason, "btc_alert")
-        self.append_btc_debug(action, symbol, ex, usd, agg_sum15, reason, True, False)
-        self.signal_history.append({
-            "ts": now,
-            "time": time.strftime("%H:%M:%S", time.localtime(now)),
-            "symbol": symbol,
-            "exchange": ex,
-            "label": "BTC_ALERT",
-            "event": self.fmt_usd(usd),
-            "flow": self.fmt_usd(agg_sum15),
-            "cnt": agg_cnt,
-            "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
-            "mapped": "BTC",
-            "message_id": message_id or "",
-            "rank": "",
-            "price_1h": "",
-            "price_4h": "",
-            "price_24h": "",
-            "oi_now": "",
-            "oi_5m": "",
-            "oi_4h": "",
-            "long_pct": "",
-            "short_pct": "",
-            "funding": "",
-        })
+            if cooldown_active:
+                self.append_btc_debug(
+                    "btc_alert_suppressed_cooldown",
+                    symbol, ex, usd, agg_sum15,
+                    f"{reason}:{cooldown_key}",
+                    False, True,
+                )
+                continue
+
+            text = self.msg_btc_alert(reason, ex, side, usd, agg_sum15, agg_cnt, bucket)
+            message_id = await self.send(text, count_signal=False, kind="btc_alert")
+
+            self.btc_cooldowns[cooldown_key] = now
+            self.btc_last_alert_ts = now
+            self.btc_last_alert_reason = reason
+            self.btc_last_alert_exchange = ex
+            self.btc_last_alert_amount = max(float(usd), float(agg_sum15))
+
+            if reason.startswith("BINANCE SINGLE"):
+                action = "btc_alert_binance_single"
+            elif reason.startswith("BYBIT SINGLE"):
+                action = "btc_alert_bybit_single"
+            elif reason.startswith("AGG 15M"):
+                action = "btc_alert_agg_15m"
+            else:
+                action = "btc_alert"
+
+            self.append_btc_debug(action, symbol, ex, usd, agg_sum15, reason, True, False)
+            self.signal_history.append({
+                "ts": now,
+                "time": time.strftime("%H:%M:%S", time.localtime(now)),
+                "symbol": "BTCUSDT",
+                "exchange": ex,
+                "label": "BTC_ALERT",
+                "event": self.fmt_usd(usd),
+                "flow": self.fmt_usd(agg_sum15),
+                "cnt": agg_cnt,
+                "mode": str(self.cfg.get("runtime", {}).get("signal_mode", "combat")),
+                "mapped": "BTC",
+                "message_id": message_id or "",
+                "rank": "",
+                "price_1h": "",
+                "price_4h": "",
+                "price_24h": "",
+                "oi_now": "",
+                "oi_5m": "",
+                "oi_4h": "",
+                "long_pct": "",
+                "short_pct": "",
+                "funding": "",
+                "side": side_key,
+                "bucket": bucket,
+                "reason": reason,
+            })
 
     def help_text(self):
         return (
@@ -1123,11 +1195,10 @@ class Bot:
             "/export_debug_24h — выгрузить debug за 24ч\n"
             "/set section.key value — изменить лимит\n\n"
             "BTC alerts:\n"
-            "₿ BTC → выбор порога: 1M / 15M / 30M\n"
             "BTC layer всегда включён\n"
-            "threshold: $1M / $15M / $30M single или agg 15m\n"
+            "Пороги работают одновременно: $1M / $15M / $30M\n"
+            "Задержка 15м отдельная на сторону и порог\n"
             "работает в лонг и в шорт\n"
-            "cooldown: 15m\n"
             "уровни Tiger не используются\n\n"
             "В Help:\n"
             "📛 Блок лист\n"
@@ -1220,8 +1291,8 @@ class Bot:
         out.append(f"mode={mode}")
         out.append(f"blocklist={','.join(self.current_blocklist()) or '-'}")
         out.append(f"mutelist={','.join(self.load_runtime_mute()) or '-'}")
-        out.append(f"btc_alerts={'ON' if self.btc_alerts_enabled else 'OFF'}")
-        out.append(f"btc_threshold={self.fmt_usd(self.btc_alert_threshold)}")
+        out.append("btc_alerts=ON")
+        out.append("btc_buckets=$1M,$15M,$30M")
 
         out.append("")
         out.append("[btc]")
@@ -1373,7 +1444,25 @@ class Bot:
         if text in ("🏆 TOP", "/top"):
             return "<b>TOP</b>\n\nВыбери окно и биржу.", self.top_menu
         if text in ("📥 Скачать", "/download"):
-            return "<b>Скачать</b>\n\nВыбери тип выгрузки.", self.download_menu
+            ts = time.strftime('%Y%m%d_%H%M%S')
+            ok_signals = await self.send_document_text(
+                f"signals_24h_{ts}.txt",
+                self.export_signals_text(),
+                caption="<b>Сигналы за 24ч</b>",
+            )
+            ok_chat = await self.send_document_text(
+                f"chat_24h_{ts}.txt",
+                self.export_chat_history_text(),
+                caption="<b>История чата за 24ч</b>",
+            )
+            ok_debug = await self.send_document_text(
+                f"debug_24h_{ts}.txt",
+                self.export_debug_text(),
+                caption="<b>Debug за 24ч</b>",
+            )
+            if ok_signals and ok_chat and ok_debug:
+                return "✅ Все 3 файла за 24ч отправлены.", self.main_menu
+            return "⚠️ Часть файлов не отправилась. Проверь Telegram / логи.", self.main_menu
         if text in ("/export_24h", "📤 Сигналы 24ч"):
             payload = self.export_signals_text()
             fname = f"signals_24h_{time.strftime('%Y%m%d_%H%M%S')}.txt"
@@ -1391,7 +1480,7 @@ class Bot:
             return ("✅ Файл debug за 24ч отправлен." if ok else "❌ Не удалось отправить файл."), self.download_menu
 
         if text in ("⚙️ Режим", "/mode"):
-            return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000\n⚫ OFF — обычные уведомления выключены\n\n₿ BTC — выбор порога BTC alerts\nBTC layer всегда включён: $1M / $15M / $30M", self.mode_menu
+            return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000\n⚫ OFF — обычные уведомления выключены\n\nBTC layer всегда включён\nПороги BTC работают одновременно: $1M / $15M / $30M", self.mode_menu
         if text == "🟢 Normal":
             msg, kb = self.apply_signal_mode("combat")
             return "✅ Режим переключен: <b>Normal</b>\n\n" + msg, kb
@@ -1404,23 +1493,9 @@ class Bot:
         if text == "⚫ OFF":
             _msg, kb = self.apply_signal_mode("off")
             return "✅ Режим переключен: <b>OFF</b>\n\nУведомления отключены, сбор данных продолжается.", kb
-        if text in ("₿ BTC", "₿ BTC ON"):
-            return "<b>BTC alerts</b>\n\nBTC layer всегда включён. Выбери порог срабатывания:\n\n₿ BTC 1M — single или agg 15m от $1M\n₿ BTC 15M — single или agg 15m от $15M\n₿ BTC 30M — single или agg 15m от $30M", self.btc_menu
-        if text == "₿ BTC 1M":
+        if text in ("₿ BTC", "₿ BTC ON", "₿ BTC 1M", "₿ BTC 15M", "₿ BTC 30M", "₿ BTC OFF"):
             self.btc_alerts_enabled = True
-            self.btc_alert_threshold = BTC_THRESHOLD_1M
-            return "✅ BTC alerts включены\nПорог: <b>$1M</b>", self.mode_menu
-        if text == "₿ BTC 15M":
-            self.btc_alerts_enabled = True
-            self.btc_alert_threshold = BTC_THRESHOLD_15M
-            return "✅ BTC alerts включены\nПорог: <b>$15M</b>", self.mode_menu
-        if text == "₿ BTC 30M":
-            self.btc_alerts_enabled = True
-            self.btc_alert_threshold = BTC_THRESHOLD_30M
-            return "✅ BTC alerts включены\nПорог: <b>$30M</b>", self.mode_menu
-        if text == "₿ BTC OFF":
-            self.btc_alerts_enabled = True
-            return "₿ BTC layer всегда включён\nВыключение отключено. Регулируй порогом: <b>$1M / $15M / $30M</b>.", self.btc_menu
+            return "₿ BTC layer всегда включён\nПороги работают одновременно: <b>$1M / $15M / $30M</b>\nЗадержка 15м отдельная на сторону и порог.", self.mode_menu
 
         if text in ("/limits", "📊 Лимиты"):
             return self.format_limits(), self.limit_menu
