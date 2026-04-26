@@ -49,7 +49,7 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_4_3_BTC_BUCKETS_DOWNLOAD_ALL"
+BUILD_VERSION = "V3_4_4_SAFE_AUDIT"
 BUILD_DATE = "2026-04-24"
 
 
@@ -184,6 +184,14 @@ class Bot:
         self.btc_last_alert_reason = None
         self.btc_last_alert_exchange = None
         self.btc_last_alert_amount = 0.0
+        self.audit_events = {"BINANCE": 0, "BYBIT": 0}
+        self.audit_active_symbols = {"BINANCE": set(), "BYBIT": set()}
+        self.audit_last_event_ts = {"BINANCE": 0.0, "BYBIT": 0.0}
+        self.audit_bybit_subscribed_symbols = 0
+        self.audit_bybit_last_valid_symbols = []
+        self.audit_bybit_last_refresh_ts = 0.0
+        self.audit_bybit_rollback_count = 0
+        self.audit_agg_checks = deque(maxlen=3000)
         self.control_state = {"awaiting_key": None}
         self.daily_cycle_counters = {}
         self.last_daily_restart_key = None
@@ -1256,6 +1264,35 @@ class Bot:
             out.append(f"{i}. {row.get('time','')} | {row.get('dir','')} | {row.get('kind','')} | {row.get('text','')}")
         return "\n".join(out)
 
+    def export_audit_text(self):
+        now = time.time()
+        out = ["Аудит сбора и агрегации за 24ч", ""]
+        for ex in ("BINANCE", "BYBIT"):
+            last_ts = float(self.audit_last_event_ts.get(ex, 0.0) or 0.0)
+            last_text = time.strftime("%H:%M:%S", time.localtime(last_ts)) if last_ts else "-"
+            out.append(f"{ex}: events={self.audit_events.get(ex, 0)} | active_symbols={len(self.audit_active_symbols.get(ex, set()))} | last_event={last_text}")
+
+        out.append("")
+        out.append(f"BYBIT subscribed_symbols={self.audit_bybit_subscribed_symbols}")
+        out.append(f"BYBIT valid_symbols_cache={len(self.audit_bybit_last_valid_symbols)}")
+        out.append(f"BYBIT rollback_count={self.audit_bybit_rollback_count}")
+
+        out.append("")
+        out.append("[agg15_check]")
+        checks = [x for x in list(self.audit_agg_checks) if now - x.get("ts", 0) <= 86400]
+        if not checks:
+            out.append("empty")
+        else:
+            bad = [x for x in checks if abs(float(x.get("diff", 0.0))) > 0.01]
+            out.append(f"checks={len(checks)} | bad={len(bad)}")
+            for i, row in enumerate(checks[-500:], 1):
+                out.append(
+                    f"{i}. {row.get('time','')} | {row.get('exchange','')} | {row.get('symbol','')} | {row.get('side','')} | "
+                    f"raw_sum15={row.get('raw_sum15','')} | agg_sum15={row.get('agg_sum15','')} | diff={row.get('diff','')} | cnt={row.get('cnt','')}"
+                )
+        return "\n".join(out)
+
+
     def export_debug_text(self):
         now = time.time()
         out = ["Debug за 24ч", ""]
@@ -1293,6 +1330,12 @@ class Bot:
         out.append(f"mutelist={','.join(self.load_runtime_mute()) or '-'}")
         out.append("btc_alerts=ON")
         out.append("btc_buckets=$1M,$15M,$30M")
+        out.append(f"binance_events={self.audit_events.get('BINANCE', 0)}")
+        out.append(f"bybit_events={self.audit_events.get('BYBIT', 0)}")
+        out.append(f"binance_active_symbols={len(self.audit_active_symbols.get('BINANCE', set()))}")
+        out.append(f"bybit_active_symbols={len(self.audit_active_symbols.get('BYBIT', set()))}")
+        out.append(f"bybit_subscribed_symbols={self.audit_bybit_subscribed_symbols}")
+        out.append(f"bybit_rollback_count={self.audit_bybit_rollback_count}")
 
         out.append("")
         out.append("[btc]")
@@ -1340,14 +1383,14 @@ class Bot:
             self.cfg["signals"]["level_2_usd"] = 35000
             self.cfg["signals"]["level_3_usd"] = 50000
             self.cfg["signals"]["level_4_usd"] = 90000
-            self.cfg["signals"]["level_5_usd"] = 120000
-            self.cfg["signals"]["level_6_usd"] = 150000
-            self.cfg["signals"]["level_7_usd"] = 180000
-            self.cfg["signals"]["hyper_usd"] = 200000
-            self.cfg["signals"]["super_hyper_usd"] = 300000
+            self.cfg["signals"]["level_5_usd"] = 150000
+            self.cfg["signals"]["level_6_usd"] = 190000
+            self.cfg["signals"]["level_7_usd"] = 250000
+            self.cfg["signals"]["hyper_usd"] = 500000
+            self.cfg["signals"]["super_hyper_usd"] = 750000
             self.cfg["signals"]["hyper_cooldown_sec"] = 300
             self.cfg["signals"]["super_hyper_cooldown_sec"] = 3600
-            self.cfg["signals"]["monster_3h_usd"] = 500000
+            self.cfg["signals"]["monster_3h_usd"] = 1000000
             self.cfg["signals"]["monster_mute_sec"] = 10800
             self.cfg["signals"]["range_delay_sec"] = 30
             self.cfg["signals"]["range_reset_sec"] = 900
@@ -1460,8 +1503,13 @@ class Bot:
                 self.export_debug_text(),
                 caption="<b>Debug за 24ч</b>",
             )
-            if ok_signals and ok_chat and ok_debug:
-                return "✅ Все 3 файла за 24ч отправлены.", self.download_menu
+            ok_audit = await self.send_document_text(
+                f"audit_24h_{ts}.txt",
+                self.export_audit_text(),
+                caption="<b>Аудит за 24ч</b>",
+            )
+            if ok_signals and ok_chat and ok_debug and ok_audit:
+                return "✅ Все 4 файла за 24ч отправлены.", self.download_menu
             return "⚠️ Часть файлов не отправилась. Проверь Telegram / логи.", self.download_menu
         if text in ("/export_24h", "📤 Сигналы 24ч"):
             payload = self.export_signals_text()
@@ -1478,6 +1526,11 @@ class Bot:
             fname = f"debug_24h_{time.strftime('%Y%m%d_%H%M%S')}.txt"
             ok = await self.send_document_text(fname, payload, caption="<b>Debug за 24ч</b>")
             return ("✅ Файл debug за 24ч отправлен." if ok else "❌ Не удалось отправить файл."), self.download_menu
+        if text in ("/export_audit_24h", "🧾 Аудит 24ч"):
+            payload = self.export_audit_text()
+            fname = f"audit_24h_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+            ok = await self.send_document_text(fname, payload, caption="<b>Аудит за 24ч</b>")
+            return ("✅ Файл аудита за 24ч отправлен." if ok else "❌ Не удалось отправить файл."), self.download_menu
 
         if text in ("⚙️ Режим", "/mode"):
             return "<b>Выбор режима</b>\n\n🟢 Normal — мин. событие = 9000\n🟡 Fast test — мин. событие = 500\n🟠 Power day — мин. событие = 25000\n⚫ OFF — обычные уведомления выключены\n\nBTC layer всегда включён\nПороги BTC работают одновременно: $1M / $15M / $30M", self.mode_menu
@@ -2276,6 +2329,9 @@ class Bot:
 
     async def handle(self, ex, symbol, side, usd):
         now = time.time()
+        self.audit_events[ex] = self.audit_events.get(ex, 0) + 1
+        self.audit_active_symbols.setdefault(ex, set()).add(symbol)
+        self.audit_last_event_ts[ex] = now
 
         allowed_exchanges = set(self.cfg.get("signals", {}).get("allowed_exchanges", ["BINANCE", "BYBIT"]))
         if ex not in allowed_exchanges:
@@ -2288,6 +2344,18 @@ class Bot:
         self.prune(self.events_15m[agg15_key], 900, now)
         agg_sum15 = sum(v for _, v in self.events_15m[agg15_key])
         agg_cnt = len(self.events_15m[agg15_key])
+        raw_sum15 = sum(v for _, v in list(self.events_15m[agg15_key]))
+        self.audit_agg_checks.append({
+            "ts": now,
+            "time": time.strftime("%H:%M:%S", time.localtime(now)),
+            "exchange": ex,
+            "symbol": symbol,
+            "side": side,
+            "raw_sum15": self.fmt_usd(raw_sum15),
+            "agg_sum15": self.fmt_usd(agg_sum15),
+            "diff": round(float(raw_sum15) - float(agg_sum15), 6),
+            "cnt": agg_cnt,
+        })
 
         self.enqueue_ice_event(ex, symbol, side, usd, agg_sum15, agg_cnt, now)
 
@@ -2486,7 +2554,19 @@ class Bot:
         while True:
             try:
                 print("🔄 Loading Bybit symbols...", flush=True)
-                symbols = await self.get_all_bybit_symbols()
+                new_symbols = await self.get_all_bybit_symbols()
+                if isinstance(new_symbols, list) and len(new_symbols) >= 100:
+                    symbols = new_symbols
+                    self.audit_bybit_last_valid_symbols = list(symbols)
+                    self.audit_bybit_last_refresh_ts = time.time()
+                elif self.audit_bybit_last_valid_symbols:
+                    symbols = list(self.audit_bybit_last_valid_symbols)
+                    self.audit_bybit_rollback_count += 1
+                    print("⚠️ Bybit symbols invalid: rollback to last valid list", flush=True)
+                else:
+                    raise RuntimeError("Bybit symbols invalid and no previous valid list")
+
+                self.audit_bybit_subscribed_symbols = len(symbols)
                 print(f"✅ Bybit symbols loaded: {len(symbols)}", flush=True)
 
                 print("🔄 Connecting Bybit...", flush=True)
