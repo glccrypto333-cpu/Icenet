@@ -49,8 +49,8 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_5_STATE_AUDIT"
-BUILD_DATE = "2026-04-26"
+BUILD_VERSION = "V3_5_FINAL"
+BUILD_DATE = "2026-04-27"
 
 
 BTC_SYMBOLS = {"BTCUSDT", "BTCPERP"}
@@ -2435,6 +2435,45 @@ class Bot:
                 print(f"Pending flush error: {e!r}", flush=True)
             await asyncio.sleep(1.0)
 
+    async def state_reset_sweeper_loop(self):
+        # V3_5_FINAL: strict timer-based reset.
+        # Prevents stale active ranges from waiting for the next market event
+        # before timeout_15m is recorded in state_reset_history.
+        print("✅ State reset sweeper started", flush=True)
+
+        while not self.stop_event.is_set():
+            try:
+                now = time.time()
+                for state_key, st in list(self.symbol_state.items()):
+                    if not st.get("range_active"):
+                        continue
+                    if not self.should_reset_range(st, now):
+                        continue
+
+                    symbol = state_key[1] if isinstance(state_key, tuple) and len(state_key) > 1 else None
+                    side = state_key[2] if isinstance(state_key, tuple) and len(state_key) > 2 else "short"
+
+                    # BTC layer is isolated and must not be affected by altcoin range reset.
+                    if symbol and self.is_btc_whitelisted(symbol):
+                        continue
+
+                    lock = self.state_locks.setdefault(state_key, asyncio.Lock())
+                    async with lock:
+                        # Re-check after lock to avoid racing with handle().
+                        if not st.get("range_active"):
+                            continue
+                        if not self.should_reset_range(st, time.time()):
+                            continue
+
+                        self.reset_range(state_key, reason="timeout_15m_sweeper")
+                        if symbol:
+                            self.clear_symbol_flow_windows(symbol, side)
+
+            except Exception as e:
+                print(f"State reset sweeper error: {e!r}", flush=True)
+
+            await asyncio.sleep(30.0)
+
 
     def update_monster(self, state_key, now, usd):
         dq = self.events_3h[state_key]
@@ -2758,6 +2797,7 @@ class Bot:
             self.watchdog_loop(),
             self.telegram_control_loop(),
             self.pending_flush_loop(),
+            self.state_reset_sweeper_loop(),
             self.ice_worker_loop(),
         )
 
