@@ -49,7 +49,7 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_5_FINAL_BYBIT_GUARD"
+BUILD_VERSION = "V3_5_FINAL_DELIVERY_AUDIT_2"
 BUILD_DATE = "2026-04-29"
 
 
@@ -2223,8 +2223,6 @@ class Bot:
         mapping_note = ""
         if mode == "mapped" and by_sym:
             mapping_note = f"\n⚠️ Bybit аналог: <b>{self.esc(by_sym)}</b>"
-        elif mode == "na":
-            mapping_note = "\n⚠️ Нет точного тикера на Bybit"
 
         cascade_line = f"\n<b>КАСКАД: +{cascade_extra_usd:,}$</b>".replace(",", " ") if monster else ""
 
@@ -2332,8 +2330,6 @@ class Bot:
             "cascade_step": int(st.get("cascade_step_sent", 0) or 0),
             "last_meaningful_age_sec": int(max(0.0, now - float(st.get("last_level_change_ts", 0.0) or now))),
         }
-        self.signal_history.append(row)
-
         snap["elapsed_text"] = await self.elapsed_timer_text(
             st,
             symbol,
@@ -2342,7 +2338,11 @@ class Bot:
         )
         print(self.trigger_log_line(symbol, snap, hyper=False), flush=True)
         message_id = None if self.is_muted(symbol) else await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
+        if not message_id and not self.is_muted(symbol):
+            print(f"SKIP_HISTORY_SEND_FAILED {symbol} label={row['label']}", flush=True)
+            return
         row["message_id"] = message_id or ""
+        self.signal_history.append(row)
 
         st["last_sent_level"] = st["pending_level"]
         st["max_level_sent"] = max(st.get("max_level_sent", 0), st["last_sent_level"])
@@ -2447,8 +2447,6 @@ class Bot:
             "cascade_step": int(cascade_step),
             "last_meaningful_age_sec": int(max(0.0, now - float(st.get("last_level_change_ts", 0.0) or now))),
         }
-        self.signal_history.append(row)
-
         snap["elapsed_text"] = await self.elapsed_timer_text(
             st,
             symbol,
@@ -2458,7 +2456,11 @@ class Bot:
 
         print(self.trigger_log_line(symbol, snap, hyper=False) + f" CASCADE +{cascade_step * 100}k", flush=True)
         message_id = None if self.is_muted(symbol) else await self.send(self.msg_signal(symbol, snap, stats, hyper=False))
+        if not message_id and not self.is_muted(symbol):
+            print(f"SKIP_HISTORY_SEND_FAILED {symbol} label={row['label']}", flush=True)
+            return
         row["message_id"] = message_id or ""
+        self.signal_history.append(row)
 
         st["cascade_step_sent"] = cascade_step
         st["last_level_change_ts"] = now
