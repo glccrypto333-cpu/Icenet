@@ -52,7 +52,6 @@ runtime:
   signal_mode: combat
 symbols:
   blacklist:
-  - 1000PEPEUSDT
   - AAVEUSDT
   - ADAUSDT
   - APTUSDT
@@ -71,7 +70,6 @@ symbols:
   - DAIUSDT
   - DOGEUSDT
   - DOTUSDT
-  - ENAUSDT
   - ETCUSDT
   - ETHFIUSDT
   - ETHUSDT
@@ -87,21 +85,16 @@ symbols:
   - MNTUSDT
   - NATGASUSDT
   - NEARUSDT
-  - NEIROUSDT
   - OKBUSDT
   - OPUSDT
   - PAXGUSDT
-  - PEPEUSDT
-  - POPCATUSDT
   - PYUSDUSDT
   - RLUSDUSDT
-  - SEIUSDT
   - SHIBUSDT
   - SKYUSDT
   - SOLUSDT
   - SUIUSDT
   - TAOUSDT
-  - TIAUSDT
   - TONUSDT
   - TRXUSDT
   - UNIUSDT
@@ -110,7 +103,6 @@ symbols:
   - USDDUSDT
   - USDEUSDT
   - USDTUSDT
-  - WIFUSDT
   - WLFIUSDT
   - WTIUSDT
   - XAGUSDT
