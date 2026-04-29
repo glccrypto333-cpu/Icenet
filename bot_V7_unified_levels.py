@@ -49,8 +49,8 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_5_FINAL_BTC_COUNTER_AUDIT"
-BUILD_DATE = "2026-04-28"
+BUILD_VERSION = "V3_5_FINAL_BTC_DAILY_COUNTER"
+BUILD_DATE = "2026-04-29"
 
 
 BTC_SYMBOLS = {"BTCUSDT", "BTCPERP"}
@@ -1104,19 +1104,19 @@ class Bot:
     def btc_side_key(self, side):
         return "LONG" if str(side or "").lower() == "long" else "SHORT"
 
-    def btc_24h_counts(self):
-        now = time.time()
+    def btc_daily_counts(self):
+        day_key = self.msk_day_key()
         long_count = 0
         short_count = 0
         for item in self.signal_history:
             try:
-                if float(item.get("ts", 0.0)) < now - 86400:
-                    continue
                 if item.get("symbol") != "BTCUSDT":
                     continue
                 if str(item.get("label", "")) != "BTC_ALERT":
                     continue
-                side_key = str(item.get("side", "")).upper()
+                if self.msk_day_key(float(item.get("ts", 0.0) or 0.0)) != day_key:
+                    continue
+                side_key = str(item.get("side", item.get("btc_side", ""))).upper()
                 if side_key == "LONG":
                     long_count += 1
                 elif side_key == "SHORT":
@@ -1154,7 +1154,7 @@ class Bot:
         side_key = self.btc_side_key(side)
 
         if long_count is None or short_count is None:
-            long_count, short_count = self.btc_24h_counts()
+            long_count, short_count = self.btc_daily_counts()
             if side_key == "LONG":
                 long_count += 1
             else:
@@ -1205,7 +1205,7 @@ class Bot:
                 )
                 continue
 
-            long_count_before, short_count_before = self.btc_24h_counts()
+            long_count_before, short_count_before = self.btc_daily_counts()
             long_count_after = long_count_before + (1 if side_key == "LONG" else 0)
             short_count_after = short_count_before + (1 if side_key == "SHORT" else 0)
 
@@ -1269,8 +1269,8 @@ class Bot:
                 "btc_side": side_key,
                 "btc_bucket": bucket,
                 "btc_reason": reason,
-                "btc_count_long_24h": long_count_after,
-                "btc_count_short_24h": short_count_after,
+                "btc_count_long_day": long_count_after,
+                "btc_count_short_day": short_count_after,
                 "cooldown_key": cooldown_key,
             })
 
@@ -1329,7 +1329,7 @@ class Bot:
                 f"last_meaningful_age_sec={row.get('last_meaningful_age_sec','')} | "
                 f"btc_side={row.get('btc_side', row.get('side',''))} | btc_bucket={row.get('btc_bucket', row.get('bucket',''))} | "
                 f"btc_reason={row.get('btc_reason', row.get('reason',''))} | "
-                f"btc_long_24h={row.get('btc_count_long_24h','')} | btc_short_24h={row.get('btc_count_short_24h','')} | "
+                f"btc_long_day={row.get('btc_count_long_day','')} | btc_short_day={row.get('btc_count_short_day','')} | "
                 f"cooldown_key={row.get('cooldown_key','')}"
             )
         return "\n".join(out)
@@ -1337,7 +1337,7 @@ class Bot:
     def export_signals_csv_text(self):
         now = time.time()
         items = [row for row in list(self.signal_history) if now - row.get('ts', 0) <= 86400]
-        cols = ['time','symbol','exchange','label','event','flow','cnt','mode','mapped','message_id','rank','price_1h','price_4h','price_24h','oi_now','oi_5m','oi_4h','long_pct','short_pct','funding','cycle_id','mode_at_cycle_start','monster_base','cascade_step','last_meaningful_age_sec','btc_side','btc_bucket','btc_reason','btc_count_long_24h','btc_count_short_24h','cooldown_key']
+        cols = ['time','symbol','exchange','label','event','flow','cnt','mode','mapped','message_id','rank','price_1h','price_4h','price_24h','oi_now','oi_5m','oi_4h','long_pct','short_pct','funding','cycle_id','mode_at_cycle_start','monster_base','cascade_step','last_meaningful_age_sec','btc_side','btc_bucket','btc_reason','btc_count_long_day','btc_count_short_day','cooldown_key']
         sio = io.StringIO()
         w = csv.DictWriter(sio, fieldnames=cols)
         w.writeheader()
@@ -1425,7 +1425,7 @@ class Bot:
                     f"cascade_step={row.get('cascade_step','')} | last_meaningful_age_sec={row.get('last_meaningful_age_sec','')} | "
                     f"btc_side={row.get('btc_side', row.get('side',''))} | btc_bucket={row.get('btc_bucket', row.get('bucket',''))} | "
                     f"btc_reason={row.get('btc_reason', row.get('reason',''))} | "
-                    f"btc_long_24h={row.get('btc_count_long_24h','')} | btc_short_24h={row.get('btc_count_short_24h','')} | "
+                    f"btc_long_day={row.get('btc_count_long_day','')} | btc_short_day={row.get('btc_count_short_day','')} | "
                     f"cooldown_key={row.get('cooldown_key','')}"
                 )
 
