@@ -2807,6 +2807,12 @@ class Bot:
                 else:
                     raise RuntimeError("Bybit symbols invalid and no previous valid list")
 
+                # Keep resolver cache in sync with the actually subscribed Bybit universe.
+                # Critical for BYBIT_GUARD: signal filtering must use the same symbols
+                # that the websocket is subscribed to, including rollback case.
+                self.bybit_symbols_cache = sorted(set(symbols))
+                self.bybit_symbols_cache_ts = time.time()
+
                 self.audit_bybit_subscribed_symbols = len(symbols)
                 print(f"✅ Bybit symbols loaded: {len(symbols)}", flush=True)
 
