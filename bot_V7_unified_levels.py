@@ -49,7 +49,7 @@ TELEGRAM_POLL_OFFSET_FILE = RUNTIME / "telegram_update_offset.txt"
 BLOCKLIST_RUNTIME_FILE = RUNTIME / "blocklist_runtime.json"
 MUTE_RUNTIME_FILE = RUNTIME / "mute_runtime.json"
 
-BUILD_VERSION = "V3_5_FINAL_BTC_DAILY_COUNTER"
+BUILD_VERSION = "V3_5_FINAL_BYBIT_GUARD"
 BUILD_DATE = "2026-04-29"
 
 
@@ -2289,12 +2289,26 @@ class Bot:
             st["pending_snapshot"] = None
             return
 
+        by_sym, by_mode = self.resolve_bybit_symbol(symbol)
+        if not by_sym:
+            print(f"SKIP_NO_BYBIT_SYMBOL {symbol} mode={by_mode}", flush=True)
+            self.append_state_transition(
+                symbol,
+                state_key,
+                "SKIP_NO_BYBIT_SYMBOL",
+                st=st,
+                extra={"reason": "no_exact_or_mapped_bybit_symbol"},
+            )
+            st["pending_level"] = 0
+            st["pending_since_ts"] = 0.0
+            st["pending_snapshot"] = None
+            return
+
         snap["cycle_num"] = self.register_cycle_start(symbol)
         stats = await self.get_symbol_stats(symbol)
         tf = stats.get("tf", {})
         oi = stats.get("oi", {})
         ratio = stats.get("ratio", {})
-        by_sym, _mode = self.resolve_bybit_symbol(symbol)
         row = {
             "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
             "symbol": symbol, "exchange": snap["ex"], "label": ("MONSTER" if snap['level']==10 else ("SUPER HYPER" if snap['level']==9 else ("HYPER" if snap['level']==8 else f"LVL{snap['level']}"))),
@@ -2392,13 +2406,24 @@ class Bot:
 
         now = time.time()
         signature = f"{symbol}|{snap['ex']}|MONSTER|C{cascade_step}|{round(float(snap['sum15']),1)}"
+        by_sym, by_mode = self.resolve_bybit_symbol(symbol)
+        if not by_sym:
+            print(f"SKIP_CASCADE_NO_BYBIT_SYMBOL {symbol} mode={by_mode}", flush=True)
+            self.append_state_transition(
+                symbol,
+                state_key,
+                "SKIP_CASCADE_NO_BYBIT_SYMBOL",
+                st=st,
+                extra={"reason": "no_exact_or_mapped_bybit_symbol"},
+            )
+            return
+
         snap["cycle_num"] = self.register_cycle_start(symbol)
         stats = await self.get_symbol_stats(symbol)
 
         tf = stats.get("tf", {})
         oi = stats.get("oi", {})
         ratio = stats.get("ratio", {})
-        by_sym, _mode = self.resolve_bybit_symbol(symbol)
         row = {
             "ts": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
             "symbol": symbol, "exchange": snap["ex"], "label": f"MONSTER +{cascade_step * 100}k",
