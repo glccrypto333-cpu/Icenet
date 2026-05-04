@@ -13,3 +13,13 @@ backup*/
 mighty_tiger_V7_work*
 mighty_tiger_v7*
 V3_2_final_flat*
+
+# VPS production local files
+.env
+.env.*
+.runtime/
+.venv/
+bot.log
+*.log
+__pycache__/
+*.pyc
